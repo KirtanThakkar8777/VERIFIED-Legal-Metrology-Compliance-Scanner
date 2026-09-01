@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+venv/
+.env
+*.db
+*.db-shm
+*.db-wal
+data/
+dist/
+*.egg-info/
+
+# Node / Frontend
+node_modules/
+dist/
+.vite/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# EasyOCR / ML model weights (large files, auto-downloaded at runtime)
+.EasyOCR/
+model/
+
+# Test artifacts
+backend/test_label.png
+backend/*.log
+
+# Reports & uploads
+backend/reports/
+backend/uploads/

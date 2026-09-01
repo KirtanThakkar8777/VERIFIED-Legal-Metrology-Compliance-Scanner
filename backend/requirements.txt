@@ -1,0 +1,15 @@
+﻿fastapi[standard]
+uvicorn[standard]
+sqlalchemy
+alembic
+python-jose[cryptography]
+passlib[bcrypt]
+python-multipart
+httpx
+beautifulsoup4
+lxml
+python-dotenv
+pydantic
+pydantic-settings
+reportlab
+aiofiles

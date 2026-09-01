@@ -1,0 +1,118 @@
+{
+  "rule_version": "PCR-2011-v2",
+  "fields": [
+    {
+      "id": "F01",
+      "label": "Manufacturer / Importer Name & Address",
+      "legal_ref": "Rule 6(1)(a)",
+      "severity": "high",
+      "patterns": [
+        "(?:manufactured|mfg|mfd|packed|marketed|imported)\\s*(?:by|for)?[:\\s]+([A-Za-z][^,\\n]{4,80})",
+        "(?:manufacturer|importer|packer)[:\\s]+([A-Za-z][^,\\n]{4,80})",
+        "Manufacturer Contact Information[:\\s]+([^\\n]{10,150})",
+        "Packer Contact Information[:\\s]+([^\\n]{10,150})"
+      ],
+      "address_patterns": [
+        "(?:address|addr)[:\\s]+([^\\n]{10,120})",
+        "(?:\\d{1,4}[,\\s]+[A-Za-z][^\\n]{10,100}(?:road|rd|street|st|nagar|colony|phase|sector|industrial|area|MIDC|midc)[^\\n]{0,60})",
+        "(?:[A-Za-z][^\\n]{5,60}[-,\\s]+(?:Maharashtra|Delhi|Gujarat|Karnataka|Tamil Nadu|Rajasthan|UP|MP|Punjab|Haryana|Telangana|West Bengal|Bihar|Odisha|Assam)[^\\n]{0,50}\\s*[-–]?\\s*\\d{6})",
+        "(?:K-\\d|Plot|Shed|Building|\\d+)[,\\s]+[A-Za-z][^\\n]{10,120}\\d{6}"
+      ],
+      "description": "Full name and complete address of manufacturer or importer."
+    },
+    {
+      "id": "F02",
+      "label": "Net Quantity / Net Weight / Net Volume",
+      "legal_ref": "Rule 6(1)(b)",
+      "severity": "high",
+      "patterns": [
+        "(?:net\\s*(?:quantity|qty|weight|wt|volume|vol|content|contents?))[:\\s]*([\\d,.]+\\s*(?:g|gm|gms|gram|grams|kg|kgs|kilogram|ml|mL|millilitre|l|litre|liter|oz|lb|lbs|pcs|pieces|nos|units|tablets?|tabs?|capsules?|sachets?))",
+        "(?:unit\\s*count|item\\s*count|count)[:\\s]*(\\d+\\s*(?:count|tablet|capsule|piece|nos|units?))",
+        "(?:number\\s*of\\s*(?:items|pieces|tablets|capsules))[:\\s]*(\\d+\\s*(?:count|tablet|capsule)?)",
+        "([\\d,.]+\\s*(?:g|gm|gms|gram|grams|kg|kgs|ml|mL|l|litre|liter)\\b)",
+        "(\\d+\\s*(?:Tablets?|Capsules?|Sachets?|Strips?)\\b)",
+        "item\\s*weight[:\\s]*([\\d,.]+\\s*(?:g|gm|gram|grams|kg|kgs|Grams|Kilograms))"
+      ],
+      "description": "Net quantity in standard unit of weight, volume, measure, or number."
+    },
+    {
+      "id": "F03",
+      "label": "Month & Year of Manufacture / Packing",
+      "legal_ref": "Rule 6(1)(c)",
+      "severity": "high",
+      "patterns": [
+        "(?:mfg|mfd|manufactured|packed|packing|date\\s*of\\s*(?:manufacture|mfg|packing|pack))\\s*(?:date|dt|on)?[:\\s.]*([A-Za-z]{3,9}\\.?\\s*\\d{4}|\\d{1,2}[/\\-.\\s]\\d{4}|\\d{2}[/\\-.]\\d{2}[/\\-.]\\d{4}|\\d{4}[/\\-.]\\d{2}|\\d{2}\\s+\\d{4})",
+        "(?:month\\s*(?:and|&)?\\s*year\\s*of\\s*(?:manufacture|mfg|packing))[:\\s]*([A-Za-z]{3,9}\\.?\\s*\\d{4}|\\d{1,2}[/\\-.]\\d{4})",
+        "(?:mfg\\s*dt|mfd\\s*dt|dom|date\\s*of\\s*mfg)[.:\\s]+([\\d/\\-A-Za-z.\\s]{5,20})",
+        "(?:manufactured\\s*on|packed\\s*on)[:\\s]+([A-Za-z]{3,9}\\.?\\s*\\d{4}|\\d{1,2}[/\\-.\\s]\\d{4})"
+      ],
+      "description": "Month and year of manufacture or packing."
+    },
+    {
+      "id": "F04",
+      "label": "Best Before / Expiry Date",
+      "legal_ref": "Rule 6(1)(d)",
+      "severity": "high",
+      "patterns": [
+        "(?:best\\s*(?:before|by)|bb|bbd|expiry|expires?|exp|use\\s*by|use\\s*before|best\\s*if\\s*used\\s*by)[.:\\s]*([A-Za-z]{3,9}\\.?\\s*\\d{4}|\\d{1,2}[/\\-.]\\d{4}|\\d{2}[/\\-.]\\d{2}[/\\-.]\\d{4}|\\d{4}[/\\-.]\\d{2})",
+        "(?:shelf\\s*life)[:\\s]+(\\d+\\s*(?:months?|years?|days?)\\s*(?:from\\s*(?:date\\s*of\\s*)?(?:manufacture|mfg|packing|pack))?)",
+        "(?:expiry\\s*date|use\\s*by\\s*date)[:\\s]*([A-Za-z]{3,9}\\.?\\s*\\d{4}|\\d{1,2}[/\\-.]\\d{4})"
+      ],
+      "description": "Best before / expiry date or shelf-life statement."
+    },
+    {
+      "id": "F05",
+      "label": "Maximum Retail Price (MRP)",
+      "legal_ref": "Rule 6(1)(e)",
+      "severity": "high",
+      "patterns": [
+        "(?:mrp|m\\.r\\.p\\.|maximum\\s*retail\\s*price)[.:\\s]*(?:rs\\.?|₹|inr|\\u20b9)?\\s*([\\d,]+(?:\\.\\d{1,2})?)",
+        "(?:M\\.R\\.P|MRP)[^₹\\d]*(₹|Rs\\.?)\\s*([\\d,]+(?:\\.\\d{1,2})?)",
+        "₹\\s*([\\d,]+(?:\\.\\d{1,2})?)",
+        "(?:rs\\.?)\\s*([\\d,]+(?:\\.\\d{1,2})?)\\s*(?:mrp|incl\\.?\\s*all\\s*taxes?)",
+        "(?:price|Price)[:\\s]*(?:₹|Rs\\.?)\\s*([\\d,]+(?:\\.\\d{1,2})?)"
+      ],
+      "description": "MRP inclusive of all taxes (must include Rs. or ₹ symbol)."
+    },
+    {
+      "id": "F06",
+      "label": "Consumer Care / Grievance Contact",
+      "legal_ref": "Rule 6(1)(f)",
+      "severity": "medium",
+      "patterns": [
+        "(?:consumer\\s*care|customer\\s*care|helpline|toll\\s*free|grievance|contact\\s*us)[:\\s]+([^\\n]{5,150})",
+        "(?:contact|call|email|care)[:\\s]+([^\\n]{5,100})",
+        "(?:1800[\\s\\-]?[\\d\\s\\-]{7,12})",
+        "(?:[+\\d][\\d\\s\\-]{9,14})",
+        "(?:Manufacturer|Packer)\\s*Contact\\s*Information[:\\s]+([^\\n]{10,200})"
+      ],
+      "description": "Consumer Care / Grievance contact — name, address, phone, email."
+    },
+    {
+      "id": "F07",
+      "label": "Country of Origin",
+      "legal_ref": "Rule 6(1)(g) + LM(PC)R-2017 Amdt.",
+      "severity": "high",
+      "patterns": [
+        "(?:country\\s*of\\s*origin|made\\s*in|product\\s*of|origin|manufactured\\s*in)[:\\s]+([A-Za-z\\s]{3,40})",
+        "Country of Origin[:\\s]+([A-Za-z\\s]{2,30})",
+        "\\bMade\\s+in\\s+([A-Za-z\\s]{3,30})\\b",
+        "(?:origin|Origin)[:\\s]+([A-Za-z]{3,30})"
+      ],
+      "description": "Country of origin (mandatory post-2017 amendment)."
+    },
+    {
+      "id": "F08",
+      "label": "FSSAI Licence / Importer Registration",
+      "legal_ref": "FSS Act 2006 + LMPCR 2011",
+      "severity": "medium",
+      "patterns": [
+        "(?:fssai|fss|food\\s*safety)[:\\s#.]*([\\d]{14})",
+        "(?:licence\\s*no|lic\\.?\\s*no|license\\s*no)[.:\\s#]+([\\d]{14}|[A-Z0-9]{10,20})",
+        "\\b([1-9][0-9]{13})\\b",
+        "FSSAI[\\s\\w]*[:\\s#]*([\\d]{14})"
+      ],
+      "description": "14-digit FSSAI licence number (food/health products)."
+    }
+  ]
+}
