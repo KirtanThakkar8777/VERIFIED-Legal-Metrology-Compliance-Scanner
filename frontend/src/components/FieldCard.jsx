@@ -39,17 +39,6 @@ export default function FieldCard({ field, index }) {
               <span className="font-mono text-ink-navy">{field.detected_value}</span>
             </div>
           )}
-          {field.normalized_value && field.normalized_value !== field.detected_value && (
-            <div className="flex gap-2 text-sm">
-              <span className="text-muted-fg shrink-0">Normalised:</span>
-              <span className="font-mono text-seal-gold">{field.normalized_value}</span>
-            </div>
-          )}
-          {field.evidence && (
-            <div className="text-xs text-muted-fg bg-ledger p-2 border border-border-main font-mono break-all">
-              {field.evidence}
-            </div>
-          )}
           {field.reason && (
             <div className="text-sm text-[#C41E3A]">⚠ {field.reason}</div>
           )}

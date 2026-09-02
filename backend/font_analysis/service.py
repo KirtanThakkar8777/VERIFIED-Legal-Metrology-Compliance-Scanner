@@ -133,7 +133,8 @@ def analyse_font(
         px_per_mm = 96 / 25.4   # ≈ 3.78 px/mm at 96 DPI
 
     # ── EasyOCR detection ───────────────────────────────────────────────────
-    reader = easyocr.Reader(["en"], gpu=False, verbose=False)
+    from ocr.service import _get_reader
+    reader = _get_reader()
     detections = reader.readtext(img_array)  # [[bbox, text, conf], ...]
 
     min_req_mm = min_font_height_mm(package_area_cm2)

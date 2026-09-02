@@ -6,13 +6,35 @@ from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
 
 from config import settings
-from database import engine, Base
+from database import engine, Base, SessionLocal
 
 # Import all models so create_all picks them up
 import models  # noqa: F401
 
 # Create all tables on startup
 Base.metadata.create_all(bind=engine)
+
+
+# ── Seed default admin user (runs once on startup if no users exist) ──────────
+def _seed_admin():
+    from auth.utils import hash_password
+    db = SessionLocal()
+    try:
+        if db.query(models.User).count() == 0:
+            admin = models.User(
+                name="Admin",
+                email="admin@verified.dev",
+                password_hash=hash_password("admin123"),
+                role="REGULATOR",
+            )
+            db.add(admin)
+            db.commit()
+            print("✅ Default admin created → email: admin@verified.dev  password: admin123")
+    finally:
+        db.close()
+
+_seed_admin()
+
 
 app = FastAPI(
     title=settings.app_name,
@@ -23,7 +45,12 @@ app = FastAPI(
 # ── CORS ──────────────────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5174",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

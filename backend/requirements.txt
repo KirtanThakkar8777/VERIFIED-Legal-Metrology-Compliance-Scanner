@@ -1,4 +1,4 @@
-﻿fastapi[standard]
+fastapi[standard]
 uvicorn[standard]
 sqlalchemy
 alembic
@@ -13,3 +13,5 @@ pydantic
 pydantic-settings
 reportlab
 aiofiles
+easyocr
+opencv-python-headless

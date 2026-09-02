@@ -12,18 +12,27 @@ import os
 from typing import Optional
 
 
+_READER = None
+
+
+def _get_reader():
+    global _READER
+    if _READER is None:
+        import easyocr
+        _READER = easyocr.Reader(["en"], gpu=False, verbose=False)
+    return _READER
+
+
 def _try_easyocr(image_bytes: bytes) -> Optional[tuple[str, float]]:
     """Return (text, avg_confidence) using EasyOCR, or None on failure."""
     try:
-        import easyocr
         import numpy as np
         from PIL import Image
 
         img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         img_array = np.array(img)
 
-        # gpu=False for CPU-only environments; model weights auto-download on first run
-        reader = easyocr.Reader(["en"], gpu=False, verbose=False)
+        reader = _get_reader()
         results = reader.readtext(img_array)
 
         if not results:
@@ -37,7 +46,6 @@ def _try_easyocr(image_bytes: bytes) -> Optional[tuple[str, float]]:
     except ImportError:
         return None
     except Exception as exc:
-        # EasyOCR is installed but something else went wrong; propagate
         raise RuntimeError(f"EasyOCR failed: {exc}") from exc
 
 
