@@ -9,18 +9,29 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from scan.normalizer import normalize_mrp, normalize_quantity, normalize_date
 
-# Load rules once at module level
+# Load rules — reload from disk automatically if file changes
 _RULES_PATH = Path(__file__).parent / "rules.json"
-with open(_RULES_PATH, encoding="utf-8") as _f:
-    _RULES = json.load(_f)
+_rules_cache: Dict = {}
+_rules_mtime: float = 0.0
 
-RULE_VERSION: str = _RULES["rule_version"]
-FIELDS: List[Dict[str, Any]] = _RULES["fields"]
+
+def _get_rules() -> Dict:
+    global _rules_cache, _rules_mtime
+    try:
+        mtime = _RULES_PATH.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    if mtime != _rules_mtime or not _rules_cache:
+        with open(_RULES_PATH, encoding="utf-8") as f:
+            _rules_cache = json.load(f)
+        _rules_mtime = mtime
+    return _rules_cache
 
 
 # ── Normaliser dispatch ───────────────────────────────────────────────────────
@@ -147,12 +158,12 @@ def _calculate_score(results: List[Dict]) -> int:
     return round((earned / total_weight) * 100)
 
 
-def _status_from_score(score: int, results: List[Dict]) -> str:
+def _status_from_score(score: int, results: List[Dict], fields: List[Dict]) -> str:
     high_fails = sum(
         1 for r in results
         if r["status"] == "FAIL"
         and next(
-            (f["severity"] for f in FIELDS if f["id"] == r["field_id"]), "low"
+            (f["severity"] for f in fields if f["id"] == r["field_id"]), "low"
         ) == "high"
     )
     if score >= 85 and high_fails == 0:
@@ -171,9 +182,13 @@ def run_compliance_check(text: str) -> Dict[str, Any]:
     Returns a dict with:
         rule_version, score, status, fields, violations
     """
-    results = [_check_field(f, text) for f in FIELDS]
+    rules = _get_rules()
+    fields = rules["fields"]
+    rule_version = rules["rule_version"]
+
+    results = [_check_field(f, text) for f in fields]
     score = _calculate_score(results)
-    status = _status_from_score(score, results)
+    status = _status_from_score(score, results, fields)
 
     violations = [
         {
@@ -181,7 +196,7 @@ def run_compliance_check(text: str) -> Dict[str, Any]:
             "field_label": r["field_label"],
             "legal_reference": r["legal_reference"],
             "severity": next(
-                (f["severity"] for f in FIELDS if f["id"] == r["field_id"]), "medium"
+                (f["severity"] for f in fields if f["id"] == r["field_id"]), "medium"
             ),
             "reason": r["reason"] or "",
             "evidence": r.get("evidence"),
@@ -191,7 +206,7 @@ def run_compliance_check(text: str) -> Dict[str, Any]:
     ]
 
     return {
-        "rule_version": RULE_VERSION,
+        "rule_version": rule_version,
         "score": score,
         "status": status,
         "fields": results,

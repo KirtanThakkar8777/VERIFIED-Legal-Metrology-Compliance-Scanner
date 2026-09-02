@@ -188,37 +188,37 @@ def _extract_amazon(soup: BeautifulSoup) -> tuple[str, str]:
     if mfg_match:
         all_rows["Mfg Date"] = mfg_match.group(1).strip()
 
-    # ── Build compliance text ─────────────────────────────────────────────────
+    # ── Build compliance-only text (no marketing fluff) ──────────────────────
     lines = [f"Product: {product_name}"] if product_name else []
 
-    # Add all compliance-relevant table rows
+    # Add only compliance-relevant table rows — skip generic marketing fields
+    SKIP_MARKETING = {
+        "asin", "best sellers rank", "customer reviews", "date first available",
+        "feedback", "department", "colour", "color", "flavour", "flavor",
+        "material", "style", "pattern", "finish", "brand"
+    }
     for k, v in all_rows.items():
+        kl = k.lower().strip()
+        if any(skip in kl for skip in SKIP_MARKETING):
+            continue
         if _is_compliance_key(k) or k in ("Country of Origin", "FSSAI Lic No", "Best Before", "Mfg Date"):
-            lines.append(f"{k}: {v}")
-
-    # Append bullets and description
-    if bullets_text:
-        lines.append("\nProduct Highlights:")
-        lines.append(bullets_text)
-
-    if desc_text:
-        lines.append("\nDescription:")
-        lines.append(desc_text)
+            # Cap each value at 300 chars
+            lines.append(f"{k}: {v[:300]}")
 
     if price_text:
-        lines.append(f"\n{price_text}")
+        lines.append(f"\nMRP: {price_text[:200]}")
 
-    # Add source context for the compliance engine
+    # Source context so compliance engine knows this is an e-commerce listing
     lines.append(f"\nSource: Amazon.in e-commerce listing (online marketplace)")
     lines.append("Note: Manufacturing date, expiry, and FSSAI number may only appear on physical packaging — verify with seller for full compliance.")
 
     compliance_text = "\n".join(lines)
 
-    # ── Fallback: if we got almost nothing, dump full page text (capped) ──────
+    # ── Fallback: if we got almost nothing, search full text briefly ──────────
     if len(compliance_text) < 200:
         for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
             tag.decompose()
-        compliance_text = soup.get_text("\n", strip=True)[:8000]
+        compliance_text = soup.get_text("\n", strip=True)[:5000]
 
     return product_name, compliance_text
 

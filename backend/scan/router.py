@@ -83,12 +83,25 @@ def create_scan(payload: schemas.ScanRequest, db: Session = Depends(get_db)):
     """Run compliance check on pasted/extracted text and persist the result."""
     if not payload.text or len(payload.text.strip()) < 10:
         raise HTTPException(status_code=422, detail="Text too short to analyse.")
+
+    # ── Auto-extract product name from text if not provided ───────────────────
+    import re as _re
+    product_name = payload.product_name
+    if not product_name:
+        # Try: "Product: X", "Product Name: X", "Name: X", "Item: X", "Brand: X"
+        _name_match = _re.search(
+            r"(?:^|\n)\s*(?:product\s*(?:name)?|brand|item|commodity|generic\s*name)\s*[:\-]\s*(.+)",
+            payload.text, _re.IGNORECASE
+        )
+        if _name_match:
+            product_name = _name_match.group(1).strip()[:120]
+
     result = run_compliance_check(payload.text)
     scan = _save_scan(
         db,
         raw_text=payload.text,
         result=result,
-        product_name=payload.product_name or "Unknown",
+        product_name=product_name or "Unknown",
         category=payload.category or "General Packaged Commodities",
         platform=payload.platform or "Unknown",
         source_type=payload.source_type,

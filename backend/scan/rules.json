@@ -54,9 +54,9 @@
       "legal_ref": "Rule 6(1)(d)",
       "severity": "high",
       "patterns": [
+        "(?:best\\s*(?:before|by)|use\\s*(?:by|before)|best\\s*if\\s*used\\s*by|shelf\\s*life|expiry\\s*period)[:\\s]+(\\d+\\s*(?:months?|years?|days?|wks?|weeks?)(?:\\s*from\\s*(?:the\\s*)?(?:date\\s*of\\s*)?(?:manufacture|manufacturing|mfg|mfd|packing|packaging|pack|pkd))?)",
         "(?:best\\s*(?:before|by)|bb|bbd|expiry|expires?|exp|use\\s*by|use\\s*before|best\\s*if\\s*used\\s*by)[.:\\s]*([A-Za-z]{3,9}\\.?\\s*\\d{4}|\\d{1,2}[/\\-.]\\d{4}|\\d{2}[/\\-.]\\d{2}[/\\-.]\\d{4}|\\d{4}[/\\-.]\\d{2})",
-        "(?:shelf\\s*life)[:\\s]+(\\d+\\s*(?:months?|years?|days?)\\s*(?:from\\s*(?:date\\s*of\\s*)?(?:manufacture|mfg|packing|pack))?)",
-        "(?:expiry\\s*date|use\\s*by\\s*date)[:\\s]*([A-Za-z]{3,9}\\.?\\s*\\d{4}|\\d{1,2}[/\\-.]\\d{4})"
+        "(?:expiry\\s*date|use\\s*by\\s*date|exp\\s*date)[:\\s]*([A-Za-z]{3,9}\\.?\\s*\\d{4}|\\d{1,2}[/\\-.]\\d{4}|\\d{2}[/\\-.]\\d{2}[/\\-.]\\d{4})"
       ],
       "description": "Best before / expiry date or shelf-life statement."
     },
