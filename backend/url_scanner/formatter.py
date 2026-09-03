@@ -1,223 +1,318 @@
 """
 url_scanner/formatter.py
 Format the normalized product model into structured textarea text.
+
+RULE: Only write "Not Detected" when a field is truly empty.
+      NEVER pre-fill "Not Detected" before extraction runs.
 """
 from __future__ import annotations
 
 
+_LINE = "=" * 52
+
+
 def _section(title: str) -> str:
-    line = "=" * 52
-    return f"\n{line}\n{title}\n{line}\n"
+    return f"\n{_LINE}\n{title}\n{_LINE}\n"
 
 
-def _field(label: str, value: str, indent: int = 0) -> str:
-    v = (value or "Not Detected").strip()
-    prefix = " " * indent
-    return f"{prefix}{label}:\n{prefix}{v}\n"
+def _field(label: str, value: str, indent: str = "") -> str:
+    """Write a label:value pair. Skip entirely if value is empty."""
+    v = (value or "").strip()
+    if not v:
+        return f"{indent}{label}:\nNot Detected\n"
+    return f"{indent}{label}:\n{indent}{v}\n"
 
 
-def _status_line(status: str) -> str:
-    icons = {
+def _field_optional(label: str, value: str) -> str:
+    """Write only if value is present — skip if empty."""
+    v = (value or "").strip()
+    if not v:
+        return ""
+    return f"{label}:\n{v}\n"
+
+
+def _status_icon(status: str) -> str:
+    return {
         "MATCH": "✓ MATCH",
         "MISMATCH": "⚠ MISMATCH — REVIEW REQUIRED",
         "REVIEW": "⚠ REVIEW",
-        "WEBSITE_ONLY": "ℹ Website Only (verify on package)",
-        "PACKAGE_ONLY": "ℹ Package Only",
+        "WEBSITE_ONLY": "ℹ Website Only",
+        "PACKAGE_ONLY": "ℹ Package Only (not on webpage)",
         "NOT_FOUND": "✗ Not Found",
-        "UNIT_MISMATCH": "⚠ Unit Mismatch — verify manually",
-    }
-    return icons.get(status, status)
+        "UNIT_MISMATCH": "⚠ Unit Mismatch",
+    }.get(status, status)
 
 
-def format_product(model: dict, platform_info: dict, images: list[dict], comparisons: list[dict]) -> str:
-    """
-    Format the complete normalized product model into textarea-ready text.
-    """
-    lines = []
+def _source_tag(source: str) -> str:
+    if source == "ocr":
+        return " [Source: Packaging Image]"
+    if source == "webpage":
+        return " [Source: Webpage]"
+    return ""
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # HEADER
-    # ─────────────────────────────────────────────────────────────────────────
-    lines.append(_section("PRODUCT INFORMATION"))
+
+def format_product(
+    model: dict,
+    platform_info: dict,
+    all_images: list[dict],
+    comparisons: list[dict],
+) -> str:
+    parts: list[str] = []
 
     product = model.get("product", {})
-    lines.append(_field("Product Name",  product.get("name", "")))
-    lines.append(_field("Brand",         product.get("brand", "")))
-    lines.append(_field("Category",      product.get("category", "")))
-    lines.append(_field("Variant",       product.get("variant", "")))
-    lines.append(_field("SKU / Model",   product.get("sku", "")))
-    if product.get("description"):
-        desc = product["description"][:200].replace("\n", " ")
-        lines.append(_field("Description", desc))
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # E-COMMERCE INFORMATION
-    # ─────────────────────────────────────────────────────────────────────────
-    lines.append(_section("E-COMMERCE INFORMATION"))
-
     commerce = model.get("commerce", {})
-    lines.append(_field("Platform",       platform_info.get("display_name", "")))
-    lines.append(_field("Seller",         commerce.get("seller", "")))
-
-    mrp_raw = commerce.get("mrp_raw", "")
-    if mrp_raw:
-        from url_scanner.intelligence.data_normalizer import normalize_price
-        mrp_norm = normalize_price(mrp_raw)
-        lines.append(_field("MRP",  mrp_norm["display"]))
-    else:
-        lines.append(_field("MRP",  ""))
-
-    lines.append(_field("Selling Price",  commerce.get("selling_price_raw", "")))
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # MANUFACTURER INFORMATION
-    # ─────────────────────────────────────────────────────────────────────────
-    lines.append(_section("MANUFACTURER INFORMATION"))
-    mfr = model.get("manufacturer", {})
-    parsed = mfr.get("parsed", {})
-
-    lines.append(_field("Manufacturer",       mfr.get("name") or mfr.get("address_raw", "")))
-    if parsed.get("address_line1"):
-        addr = "\n".join(filter(None, [
-            parsed.get("address_line1", ""),
-            parsed.get("address_line2", ""),
-            parsed.get("city", ""),
-            f"{parsed.get('state', '')} - {parsed.get('pincode', '')}".strip(" -"),
-            parsed.get("country", ""),
-        ]))
-        lines.append(_field("Address",  addr))
-    elif mfr.get("address_raw"):
-        lines.append(_field("Address",  mfr["address_raw"]))
-    else:
-        lines.append(_field("Address",  ""))
-
-    mc = mfr.get("country", "")
-    mconf = mfr.get("country_confidence", 0)
-    lines.append(_field("Manufacturer Country", mc))
-    if mc and mconf:
-        lines.append(_field("Confidence",        f"{mconf}%"))
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # PACKER INFORMATION
-    # ─────────────────────────────────────────────────────────────────────────
-    lines.append(_section("PACKER INFORMATION"))
+    manufacturer = model.get("manufacturer", {})
     packer = model.get("packer", {})
-    lines.append(_field("Packer",         packer.get("name") or packer.get("address_raw", "")))
-    lines.append(_field("Packer Address", packer.get("parsed", {}).get("full_address", "")))
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # IMPORTER INFORMATION
-    # ─────────────────────────────────────────────────────────────────────────
-    lines.append(_section("IMPORTER INFORMATION"))
     importer = model.get("importer", {})
-    lines.append(_field("Importer",         importer.get("name") or importer.get("address_raw", "")))
-    lines.append(_field("Importer Country", importer.get("country", "")))
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # COUNTRY OF ORIGIN
-    # ─────────────────────────────────────────────────────────────────────────
-    lines.append(_section("COUNTRY OF ORIGIN"))
     origin = model.get("origin", {})
-    lines.append(_field("Declared Country of Origin", origin.get("declared_country", "")))
-    lines.append(_field("Detected Country",           origin.get("detected_country", "")))
+    qty = model.get("quantity", {})
+    dates = model.get("dates", {})
+    cc = model.get("consumer_care", {})
+    reg = model.get("regulatory", {})
+    ocr_stats = model.get("ocr_stats", {})
+
+    # ── PRODUCT INFORMATION ────────────────────────────────────────────────────
+    parts.append(_section("PRODUCT INFORMATION"))
+    parts.append(_field("Product Name", product.get("name", "")))
+    parts.append(_field("Brand",        product.get("brand", "")))
+    parts.append(_field_optional("Category",  product.get("category", "")))
+    parts.append(_field_optional("Variant",   product.get("variant", "")))
+    parts.append(_field_optional("SKU",       product.get("sku", "")))
+    parts.append(_field_optional("Vegetarian / Non-Vegetarian", product.get("veg_status", "")))
+    desc = (product.get("description") or "").strip()[:200]
+    if desc:
+        parts.append(f"Description:\n{desc}\n")
+
+    # ── E-COMMERCE INFORMATION ─────────────────────────────────────────────────
+    parts.append(_section("E-COMMERCE INFORMATION"))
+    parts.append(_field("Platform", platform_info.get("display_name", "")))
+    parts.append(_field_optional("Seller", commerce.get("seller", "")))
+
+    mrp_norm = commerce.get("mrp_normalized") or {}
+    if mrp_norm.get("found"):
+        parts.append(f"MRP:\n{mrp_norm['display']}\n")
+    elif commerce.get("mrp_raw"):
+        parts.append(f"MRP:\n{commerce['mrp_raw']}\n")
+    else:
+        parts.append("MRP:\nNot Detected\n")
+
+    parts.append(_field_optional("Selling Price", commerce.get("selling_price_raw", "")))
+
+    # Website quantity
+    w_qty = qty.get("website_raw", "")
+    parts.append(_field_optional("Listed Quantity", w_qty))
+
+    # ── MANUFACTURER INFORMATION ───────────────────────────────────────────────
+    parts.append(_section("MANUFACTURER INFORMATION"))
+    mfr_name = manufacturer.get("name", "") or manufacturer.get("address_raw", "")
+    mfr_src = _source_tag(manufacturer.get("source", ""))
+
+    if mfr_name:
+        parts.append(f"Manufacturer{mfr_src}:\n{mfr_name}\n")
+    else:
+        parts.append("Manufacturer:\nNot Detected\n")
+
+    # Address — prefer structured, fallback to raw
+    mfr_addr = manufacturer.get("address_structured", "") or manufacturer.get("address_raw", "")
+    if mfr_addr:
+        # Clean up if same as manufacturer name
+        if mfr_addr.strip() != mfr_name.strip():
+            parts.append(f"Manufacturer Address:\n{mfr_addr}\n")
+
+    mfr_country = manufacturer.get("country", "")
+    mfr_conf = manufacturer.get("country_confidence", 0)
+    if mfr_country and mfr_country != "Unknown":
+        parts.append(f"Manufacturer Country:\n{mfr_country}\n")
+        if mfr_conf:
+            parts.append(f"Country Confidence:\n{mfr_conf}% (from address analysis)\n")
+    else:
+        parts.append("Manufacturer Country:\nNot Detected\n")
+
+    # ── PACKER INFORMATION ─────────────────────────────────────────────────────
+    packer_name = packer.get("name", "") or packer.get("address_raw", "")
+    packer_src = _source_tag(packer.get("source", ""))
+    if packer_name and packer_name.strip() != mfr_name.strip():
+        parts.append(_section("PACKER INFORMATION"))
+        parts.append(f"Packer{packer_src}:\n{packer_name}\n")
+        p_addr = packer.get("address_structured", "") or packer.get("address_raw", "")
+        if p_addr and p_addr.strip() != packer_name.strip():
+            parts.append(f"Packer Address:\n{p_addr}\n")
+
+    # ── IMPORTER INFORMATION ───────────────────────────────────────────────────
+    imp_name = importer.get("name", "") or importer.get("address_raw", "")
+    if imp_name:
+        parts.append(_section("IMPORTER INFORMATION"))
+        imp_src = _source_tag(importer.get("source", ""))
+        parts.append(f"Importer{imp_src}:\n{imp_name}\n")
+        i_addr = importer.get("address_structured", "") or importer.get("address_raw", "")
+        if i_addr and i_addr.strip() != imp_name.strip():
+            parts.append(f"Importer Address:\n{i_addr}\n")
+        if importer.get("country"):
+            parts.append(f"Importer Country:\n{importer['country']}\n")
+
+    # ── COUNTRY OF ORIGIN ──────────────────────────────────────────────────────
+    parts.append(_section("COUNTRY OF ORIGIN"))
+    declared = origin.get("declared_country", "")
+    detected = origin.get("detected_country", "")
     conf = origin.get("confidence", 0)
-    if conf:
-        lines.append(_field("Confidence",  f"{conf}%"))
+
+    if declared:
+        parts.append(f"Declared Country of Origin:\n{declared}\n")
+    else:
+        parts.append("Declared Country of Origin:\nNot Detected\n")
+
+    if detected and detected != "Unknown":
+        src_note = "(from address analysis)" if not declared else "(confirmed)"
+        parts.append(f"Detected Country:\n{detected} {src_note}\n")
+        if conf:
+            parts.append(f"Detection Confidence:\n{conf}%\n")
 
     pc = model.get("product_classification", {})
-    lines.append(_field("Product Classification", pc.get("classification", "")))
+    if pc.get("classification"):
+        parts.append(f"Product Classification:\n{pc['classification']}\n")
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # QUANTITY INFORMATION
-    # ─────────────────────────────────────────────────────────────────────────
-    lines.append(_section("QUANTITY INFORMATION"))
-    qty = model.get("quantity", {})
-    lines.append(_field("Website Quantity",  qty.get("website_raw", "")))
-    lines.append(_field("Package Quantity",  qty.get("package_raw", "")))
+    # ── PACKAGE INFORMATION ────────────────────────────────────────────────────
+    parts.append(_section("PACKAGE INFORMATION"))
+    p_qty = qty.get("package_raw", "")
+    if p_qty:
+        parts.append(f"Net Weight / Quantity [Package]:\n{p_qty}\n")
+    elif w_qty:
+        parts.append(f"Net Weight / Quantity [Website]:\n{w_qty}\n")
+    else:
+        parts.append("Net Weight / Quantity:\nNot Detected\n")
+
     norm = qty.get("normalized") or {}
-    lines.append(_field("Normalized",        norm.get("display", "")))
+    if norm.get("found"):
+        parts.append(f"Normalized Quantity:\n{norm['display']}\n")
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # DATES
-    # ─────────────────────────────────────────────────────────────────────────
-    lines.append(_section("DATES"))
-    dates = model.get("dates", {})
-    lines.append(_field("Manufacturing Date",    dates.get("mfg_date", "")))
-    lines.append(_field("Packing Date",          dates.get("packing_date", "")))
-    lines.append(_field("Expiry / Best Before",  dates.get("expiry_date") or dates.get("best_before", "")))
+    # ── REGULATORY INFORMATION ─────────────────────────────────────────────────
+    parts.append(_section("REGULATORY INFORMATION"))
+    parts.append(_field("FSSAI Licence Number", reg.get("fssai", "")))
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # CONSUMER CARE
-    # ─────────────────────────────────────────────────────────────────────────
-    lines.append(_section("CONSUMER CARE"))
-    cc = model.get("consumer_care", {})
-    lines.append(_field("Consumer Care", cc.get("raw", "")))
-    lines.append(_field("Phone",         cc.get("phone", "")))
-    lines.append(_field("Email",         cc.get("email", "")))
+    barcode = reg.get("barcode", "")
+    barcode_type = reg.get("barcode_type", "")
+    if barcode:
+        btype = f" ({barcode_type})" if barcode_type else ""
+        parts.append(f"Barcode{btype}:\n{barcode}\n")
+    else:
+        parts.append("Barcode:\nNot Detected\n")
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # REGULATORY INFORMATION
-    # ─────────────────────────────────────────────────────────────────────────
-    lines.append(_section("REGULATORY / FOOD INFORMATION"))
-    reg = model.get("regulatory", {})
-    lines.append(_field("FSSAI Licence Number", reg.get("fssai", "")))
-    lines.append(_field("Barcode / EAN",         reg.get("barcode", "")))
-    lines.append(_field("Batch / Lot Number",    reg.get("batch_no", "")))
+    qr = reg.get("qr_code", "")
+    if qr:
+        parts.append(f"QR Code:\n{qr[:200]}\n")
+
+    batch = reg.get("batch_no", "")
+    parts.append(_field_optional("Batch / Lot Number", batch))
+
     decls = reg.get("declarations", [])
     if decls:
-        lines.append(_field("Legal Declarations", "\n".join(decls)))
+        parts.append(f"Legal Declarations:\n" + "\n".join(decls) + "\n")
 
-    # OCR text (if available) — truncated
-    ocr = model.get("ocr_text", "")
-    if ocr and len(ocr) > 20:
-        lines.append(_section("OCR EXTRACTED TEXT (Packaging Images)"))
-        lines.append(ocr[:1500])
-        if len(ocr) > 1500:
-            lines.append("... [truncated — full text available in scan history]")
+    # ── INGREDIENTS ────────────────────────────────────────────────────────────
+    ingredients = model.get("ingredients", "")
+    if ingredients:
+        parts.append(_section("INGREDIENTS"))
+        parts.append(f"{ingredients}\n")
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # IMAGE ANALYSIS
-    # ─────────────────────────────────────────────────────────────────────────
-    lines.append(_section("IMAGE ANALYSIS"))
-    total_imgs = len(images)
-    packaging_imgs = sum(1 for img in images if img.get("classification", {}).get("is_packaging", False))
-    lines.append(f"Product Images Found:\n{total_imgs}\n")
-    lines.append(f"Packaging Images Identified:\n{packaging_imgs}\n")
-    if total_imgs:
-        lines.append("Image URLs (top 5):")
-        for img in images[:5]:
-            clf = img.get("classification", {})
-            cat = clf.get("category", "unknown").replace("_", " ").title()
-            lines.append(f"  [{cat}] {img.get('url', '')[:80]}")
+    # ── ALLERGEN INFORMATION ───────────────────────────────────────────────────
+    allergen = model.get("allergen_info", "")
+    if allergen:
+        parts.append(_section("ALLERGEN INFORMATION"))
+        parts.append(f"{allergen}\n")
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # WEBSITE ↔ PACKAGE COMPARISON
-    # ─────────────────────────────────────────────────────────────────────────
+    # ── STORAGE INSTRUCTIONS ───────────────────────────────────────────────────
+    storage = model.get("storage_instructions", "")
+    if storage:
+        parts.append(_section("STORAGE INSTRUCTIONS"))
+        parts.append(f"{storage}\n")
+
+    # ── DATES ─────────────────────────────────────────────────────────────────
+    parts.append(_section("DATES"))
+    parts.append(_field("Manufacturing Date",   dates.get("mfg_date", "")))
+    parts.append(_field("Packing Date",         dates.get("packing_date", "")))
+    parts.append(_field("Expiry / Best Before", dates.get("expiry_date", "")))
+
+    # ── CONSUMER CARE ──────────────────────────────────────────────────────────
+    parts.append(_section("CONSUMER CARE"))
+    cc_raw = cc.get("raw", "")
+    cc_phone = cc.get("phone", "")
+    cc_email = cc.get("email", "")
+
+    if cc_raw:
+        parts.append(f"Consumer Care:\n{cc_raw}\n")
+    if cc_phone:
+        parts.append(f"Phone:\n{cc_phone}\n")
+    if cc_email:
+        parts.append(f"Email:\n{cc_email}\n")
+    if not cc_raw and not cc_phone and not cc_email:
+        parts.append("Consumer Care:\nNot Detected\n")
+
+    # ── WEBSITE ↔ PACKAGE COMPARISON ──────────────────────────────────────────
     if comparisons:
-        lines.append(_section("VERIFICATION STATUS (Website ↔ Package)"))
+        parts.append(_section("WEBSITE ↔ PACKAGE COMPARISON"))
         for c in comparisons:
             field = c.get("field", "")
             w_val = c.get("website_value", "Not Found")
             p_val = c.get("package_value", "Not Found")
-            status = _status_line(c.get("status", ""))
+            status = _status_icon(c.get("status", ""))
             notes = c.get("notes", "")
-            lines.append(f"{field}:\n  Website:  {w_val}\n  Package:  {p_val}\n  Status:   {status}")
+            parts.append(f"{field}:\n  Website:  {w_val}\n  Package:  {p_val}\n  Status:   {status}")
             if notes:
-                lines.append(f"  Note:     {notes}")
-            lines.append("")
+                parts.append(f"  Note:     {notes}")
+            parts.append("")
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # DATA SOURCE
-    # ─────────────────────────────────────────────────────────────────────────
-    lines.append(_section("DATA SOURCE"))
-    lines.append(f"Website Data:\n{platform_info.get('display_name', 'Unknown')} Product Page\n")
-    lines.append(f"Packaging Data:\n{'Product Images + OCR' if ocr else 'Not available — use Label Image tab to add packaging OCR'}\n")
-    lines.append("Note: AI/OCR extraction is an assistance mechanism. Manual verification "
-                 "required before making any legal compliance determination.\n")
+    # ── IMAGE ANALYSIS ─────────────────────────────────────────────────────────
+    if ocr_stats:
+        parts.append(_section("IMAGE ANALYSIS"))
+        parts.append(
+            f"Images Found: {len(all_images)}\n"
+            f"Images Downloaded: {ocr_stats.get('images_downloaded', 0)}/{ocr_stats.get('images_processed', 0)}\n"
+            f"OCR Characters Extracted: {ocr_stats.get('ocr_char_count', 0)}\n"
+            f"Average OCR Confidence: {ocr_stats.get('avg_confidence', 0)*100:.0f}%\n"
+        )
+        # Per-image results
+        img_results = ocr_stats.get("image_results", [])
+        for ir in img_results:
+            url_short = ir.get("url", "")[-60:]
+            ok = "✓" if ir["downloaded"] else "✗"
+            chars = ir.get("ocr_text_len", 0)
+            conf = ir.get("ocr_confidence", 0)
+            bc = ir.get("barcodes", [])
+            bc_str = f" | Barcode: {bc[0]['value']}" if bc else ""
+            parts.append(f"  {ok} ...{url_short} | {chars} chars | {conf*100:.0f}% conf{bc_str}\n")
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Source marker for compliance engine
-    # ─────────────────────────────────────────────────────────────────────────
-    lines.append(f"Source: {platform_info.get('display_name', 'E-Commerce')} e-commerce listing (online marketplace)")
+    # ── OCR RAW TEXT ──────────────────────────────────────────────────────────
+    ocr_text = model.get("ocr_text", "")
+    if ocr_text and len(ocr_text) > 20:
+        parts.append(_section("OCR EXTRACTED TEXT (Packaging Images)"))
+        parts.append(ocr_text[:2000])
+        if len(ocr_text) > 2000:
+            parts.append("\n... [truncated]")
+        parts.append("")
 
-    return "\n".join(lines)
+    # ── DATA SOURCE ────────────────────────────────────────────────────────────
+    parts.append(_section("DATA SOURCE"))
+    parts.append(
+        f"Webpage Data:\n{platform_info.get('display_name', 'E-Commerce')} product listing\n"
+    )
+    if ocr_stats and ocr_stats.get("ocr_char_count", 0) > 20:
+        imgs_dl = ocr_stats.get("images_downloaded", 0)
+        parts.append(f"Packaging Data:\n{imgs_dl} product image(s) downloaded and OCR analysed\n")
+    else:
+        parts.append(
+            "Packaging Data:\nNot available — "
+            "use the Label Image tab to upload packaging photos for full OCR analysis\n"
+        )
+
+    parts.append(
+        "Note:\nAI/OCR extraction is an assistance mechanism. "
+        "Manual verification required before making any legal compliance determination.\n"
+    )
+
+    # ── Source marker for compliance engine ────────────────────────────────────
+    parts.append(
+        f"Source: {platform_info.get('display_name', 'E-Commerce')} "
+        "e-commerce listing (online marketplace)"
+    )
+
+    return "\n".join(p for p in parts if p is not None)

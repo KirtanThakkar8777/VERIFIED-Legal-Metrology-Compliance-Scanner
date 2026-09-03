@@ -70,6 +70,24 @@ app.include_router(font_router)
 app.include_router(url_scan_router)
 
 
+# ── Pre-warm EasyOCR on startup (in background thread) ───────────────────────
+@app.on_event("startup")
+async def _prewarm_easyocr():
+    """Load EasyOCR model in a thread at startup so first scan isn't slow."""
+    import threading
+
+    def _warm():
+        try:
+            from ocr.service import _get_reader
+            _get_reader()
+            print("[INFO] EasyOCR model pre-warmed and ready")
+        except Exception as e:
+            print(f"[WARN] EasyOCR pre-warm failed (will load on first use): {e}")
+
+    threading.Thread(target=_warm, daemon=True).start()
+
+
+
 # ── URL fetch endpoint ────────────────────────────────────────────────────────
 from scraper.service import fetch_and_extract
 import schemas
