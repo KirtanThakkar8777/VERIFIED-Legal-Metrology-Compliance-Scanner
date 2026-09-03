@@ -61,11 +61,13 @@ from auth.router import router as auth_router
 from scan.router import router as scan_router
 from dashboard.router import router as dashboard_router
 from font_analysis.router import router as font_router
+from url_scanner.router import router as url_scan_router
 
 app.include_router(auth_router)
 app.include_router(scan_router)
 app.include_router(dashboard_router)
 app.include_router(font_router)
+app.include_router(url_scan_router)
 
 
 # ── URL fetch endpoint ────────────────────────────────────────────────────────

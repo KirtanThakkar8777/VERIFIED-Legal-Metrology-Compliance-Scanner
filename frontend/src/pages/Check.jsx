@@ -1,7 +1,11 @@
 /**
  * pages/Check.jsx — Multi-tab product compliance scanner (Text | URL | Image).
+ *
+ * EXISTING FEATURES: Paste Text, OCR Image, Run Compliance Scan — all unchanged.
+ * UPGRADED: Product URL tab → full E-Commerce Intelligence Scanner with
+ *   async job polling, step progress panel, and auto textarea population.
  */
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import api from "../api/client";
 import SiteHeader from "../components/SiteHeader";
@@ -23,39 +27,177 @@ Consumer Care: 1800 425 1000 | consumercare@hul.com
 Country of Origin: India
 FSSAI Lic No.: 10013022002115`;
 
+// ── Progress Step Component ───────────────────────────────────────────────────
+function ScanStep({ label, done, error }) {
+  const icon = error
+    ? "✗"
+    : label.startsWith("✓")
+    ? null
+    : label.startsWith("⚠")
+    ? null
+    : done
+    ? "✓"
+    : "⟳";
+
+  const color = error || label.startsWith("✗")
+    ? "text-[#C41E3A]"
+    : label.startsWith("⚠")
+    ? "text-amber-700"
+    : label.startsWith("✓") || done
+    ? "text-[#16a34a]"
+    : "text-ink-navy animate-pulse";
+
+  return (
+    <div className={`text-xs font-mono py-0.5 ${color}`}>
+      {icon && <span className="mr-1">{icon}</span>}
+      {label}
+    </div>
+  );
+}
+
+// ── Progress Panel ────────────────────────────────────────────────────────────
+function ScanProgress({ steps, platform, status }) {
+  return (
+    <div className="border border-border-main bg-card-bg p-4 mt-4">
+      <div className="flex items-center justify-between mb-3">
+        <p className="mono-label text-muted-fg text-xs">PRODUCT URL SCAN</p>
+        {platform && platform !== "Detecting..." && (
+          <span className="mono-label text-xs bg-ink-navy text-ink-light px-2 py-0.5">
+            {platform}
+          </span>
+        )}
+      </div>
+      <div className="space-y-0.5 max-h-56 overflow-y-auto">
+        {steps.map((step, i) => (
+          <ScanStep
+            key={i}
+            label={step.label}
+            done={step.done}
+            error={!!step.error}
+          />
+        ))}
+        {status === "processing" && steps.length === 0 && (
+          <ScanStep label="Connecting..." done={false} />
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function Check() {
   const navigate = useNavigate();
-  const [tab, setTab]         = useState("text");
-  const [text, setText]       = useState("");
-  const [url, setUrl]         = useState("");
-  const [imageFile, setImageFile] = useState(null);
+
+  // ── Existing state (unchanged) ─────────────────────────────────────────────
+  const [tab, setTab]               = useState("text");
+  const [text, setText]             = useState("");
+  const [url, setUrl]               = useState("");
+  const [imageFile, setImageFile]   = useState(null);
   const [productName, setProductName] = useState("");
-  const [category, setCategory]       = useState("");
-  const [platform, setPlatform]       = useState("");
-  const [loading, setLoading]   = useState(false);
-  const [status, setStatus]     = useState(""); // status message
-  const [error, setError]       = useState("");
+  const [category, setCategory]     = useState("");
+  const [platform, setPlatform]     = useState("");
+  const [loading, setLoading]       = useState(false);
+  const [status, setStatus]         = useState("");
+  const [error, setError]           = useState("");
   const fileRef = useRef(null);
 
-  // ── Handlers ──────────────────────────────────────────────────────────────
+  // ── New URL scanner state ──────────────────────────────────────────────────
+  const [scanId, setScanId]         = useState(null);
+  const [scanSteps, setScanSteps]   = useState([]);
+  const [scanStatus, setScanStatus] = useState("");
+  const [scanPlatform, setScanPlatform] = useState("");
+  const [fetchBtnLabel, setFetchBtnLabel] = useState("Fetch");
+  const pollRef = useRef(null);
 
+  // Clear poll on unmount
+  useEffect(() => {
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  }, []);
+
+  // ── Poll progress until done ───────────────────────────────────────────────
+  const startPolling = useCallback((id) => {
+    if (pollRef.current) clearInterval(pollRef.current);
+
+    pollRef.current = setInterval(async () => {
+      try {
+        const { data } = await api.get(`/api/url-scan/${id}/progress`);
+        setScanSteps(data.steps || []);
+        setScanStatus(data.status);
+        setScanPlatform(data.platform || "");
+
+        if (data.status === "done") {
+          clearInterval(pollRef.current);
+          // Fetch result
+          const res = await api.get(`/api/url-scan/${id}/result`);
+          const result = res.data;
+
+          setText(result.formatted_text);
+          if (!productName) setProductName(result.product_name || "");
+          if (!platform)   setPlatform(result.platform || "");
+
+          setTab("text");
+          setFetchBtnLabel("Fetch Again");
+          setStatus("✓ Product data extracted — review the information below, then Run Compliance Scan.");
+          setLoading(false);
+        } else if (data.status === "error") {
+          clearInterval(pollRef.current);
+          setError(data.error || "Scan failed. Please try another URL or use Paste Text.");
+          setFetchBtnLabel("Fetch");
+          setLoading(false);
+        }
+      } catch (e) {
+        clearInterval(pollRef.current);
+        setError("Connection lost while polling. Please try again.");
+        setFetchBtnLabel("Fetch");
+        setLoading(false);
+      }
+    }, 1500);
+  }, [productName, platform]);
+
+  // ── Upgraded Fetch handler ─────────────────────────────────────────────────
   const handleFetchUrl = async () => {
-    if (!url.trim()) return;
-    setError(""); setLoading(true); setStatus("Fetching product page…");
+    const trimmedUrl = url.trim();
+    if (!trimmedUrl) return;
+
+    // Basic URL validation before sending
     try {
-      const { data } = await api.post("/api/fetch-url", { url });
-      setText(data.extracted_text);
-      if (!productName) setProductName(data.product_name);
-      if (!platform)   setPlatform(data.marketplace);
-      setTab("text");
-      setStatus("Text extracted — review then Run Scan.");
+      const parsed = new URL(trimmedUrl);
+      if (!["http:", "https:"].includes(parsed.protocol)) {
+        setError("Please enter a valid http:// or https:// product URL.");
+        return;
+      }
+      const host = parsed.hostname.toLowerCase();
+      if (host === "localhost" || host === "127.0.0.1" || host.startsWith("192.168.") ||
+          host.startsWith("10.") || host.startsWith("172.")) {
+        setError("Private/local network URLs are not allowed.");
+        return;
+      }
+    } catch (_) {
+      setError("Please enter a valid product URL (e.g. https://www.amazon.in/...)");
+      return;
+    }
+
+    setError("");
+    setStatus("");
+    setScanSteps([]);
+    setScanStatus("processing");
+    setScanPlatform("Detecting...");
+    setLoading(true);
+    setFetchBtnLabel("⟳ Fetching...");
+
+    try {
+      const { data } = await api.post("/api/url-scan", { url: trimmedUrl });
+      setScanId(data.scan_id);
+      setFetchBtnLabel("⟳ Analysing...");
+      startPolling(data.scan_id);
     } catch (e) {
-      setError(e.response?.data?.detail || "Failed to fetch URL.");
-    } finally {
+      setError(e.response?.data?.detail || "Failed to start URL scan. Please try again.");
+      setFetchBtnLabel("Fetch");
       setLoading(false);
+      setScanStatus("");
     }
   };
 
+  // ── Existing OCR handler (unchanged) ──────────────────────────────────────
   const handleOcr = async () => {
     if (!imageFile) return;
     setError(""); setLoading(true); setStatus("Running OCR…");
@@ -75,6 +217,7 @@ export default function Check() {
     }
   };
 
+  // ── Existing scan handler (unchanged) ─────────────────────────────────────
   const handleScan = async () => {
     const finalText = text.trim();
     if (finalText.length < 10) {
@@ -98,13 +241,13 @@ export default function Check() {
   };
 
   // ── Render ─────────────────────────────────────────────────────────────────
-
   return (
     <div className="min-h-screen flex flex-col bg-ledger">
       <SiteHeader />
       <main className="flex-1 px-4 py-10">
         <div className="mx-auto max-w-3xl">
-          {/* Page title */}
+
+          {/* Page title — unchanged */}
           <div className="mb-8">
             <p className="mono-label text-seal-gold mb-1">Legal Metrology PCR 2011</p>
             <h1 className="text-3xl font-display font-semibold text-ink-navy">
@@ -115,7 +258,7 @@ export default function Check() {
             </p>
           </div>
 
-          {/* Optional metadata */}
+          {/* Optional metadata — unchanged */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6">
             {[
               { label: "Product Name", value: productName, set: setProductName, placeholder: "e.g. Surf Excel Matic" },
@@ -135,7 +278,7 @@ export default function Check() {
             ))}
           </div>
 
-          {/* Tab bar */}
+          {/* Tab bar — unchanged */}
           <div className="flex border-b border-border-main mb-0">
             {TABS.map((t) => (
               <button
@@ -154,7 +297,8 @@ export default function Check() {
 
           {/* Tab panels */}
           <div className="border border-t-0 border-border-main bg-card-bg p-6 mb-4">
-            {/* TEXT TAB */}
+
+            {/* TEXT TAB — unchanged */}
             {tab === "text" && (
               <div className="space-y-4">
                 <div className="flex justify-between items-center">
@@ -177,38 +321,76 @@ export default function Check() {
               </div>
             )}
 
-            {/* URL TAB */}
+            {/* URL TAB — UPGRADED */}
             {tab === "url" && (
               <div className="space-y-4">
-                <label className="mono-label text-muted-fg block">Product Page URL</label>
+                <div className="flex items-center justify-between">
+                  <label className="mono-label text-muted-fg block">Product Page URL</label>
+                  {scanPlatform && scanPlatform !== "Detecting..." && (
+                    <span className="mono-label text-xs text-seal-gold">
+                      Platform Detected: {scanPlatform}
+                    </span>
+                  )}
+                </div>
+
                 <div className="flex gap-3">
                   <input
                     type="url"
                     value={url}
                     onChange={(e) => setUrl(e.target.value)}
-                    placeholder="https://www.amazon.in/dp/..."
+                    onKeyDown={(e) => e.key === "Enter" && !loading && url && handleFetchUrl()}
+                    placeholder="https://www.flipkart.com/... or https://www.amazon.in/..."
                     className="flex-1 border border-border-main bg-ledger px-3 py-2.5 text-sm text-ink-navy placeholder:text-muted-fg font-mono focus:outline-none focus:border-ink-navy"
                   />
                   <button
                     onClick={handleFetchUrl}
-                    disabled={loading || !url}
-                    className="bg-ink-navy text-ink-light px-5 py-2.5 text-sm font-medium disabled:opacity-60 hover:bg-opacity-90 transition-colors"
+                    disabled={loading || !url.trim()}
+                    className={`px-5 py-2.5 text-sm font-medium transition-colors disabled:opacity-60 min-w-[110px] text-center ${
+                      fetchBtnLabel.startsWith("✓")
+                        ? "bg-[#16a34a] text-white"
+                        : "bg-ink-navy text-ink-light hover:bg-opacity-90"
+                    }`}
                   >
-                    Fetch
+                    {fetchBtnLabel}
                   </button>
                 </div>
+
+                {/* Supported platforms */}
                 <p className="text-xs text-muted-fg">
-                  Supports: Amazon.in, Flipkart, Meesho, Myntra, BigBasket, and most product pages.
+                  Supports: Amazon · Flipkart · Meesho · Myntra · JioMart · BigBasket · Blinkit · Nykaa · Snapdeal · and more.
                 </p>
-                {text && (
-                  <div className="border border-border-main bg-ledger p-3 text-xs text-muted-fg font-mono max-h-48 overflow-auto">
-                    {text.slice(0, 600)}…
+
+                {/* Progress panel — shown during/after scan */}
+                {(scanStatus === "processing" || scanSteps.length > 0) && (
+                  <ScanProgress
+                    steps={scanSteps}
+                    platform={scanPlatform}
+                    status={scanStatus}
+                  />
+                )}
+
+                {/* Extracted text preview (only after fetch, before tab switch) */}
+                {text && scanStatus === "done" && (
+                  <div className="border border-[#16a34a]/30 bg-[#16a34a]/5 px-4 py-3 text-xs text-[#16a34a]">
+                    ✓ Extracted data has been loaded into the Paste Text tab.
+                    Click "Paste Text" above to review and edit before scanning.
+                  </div>
+                )}
+
+                {/* Instructions */}
+                {!loading && !scanSteps.length && (
+                  <div className="text-xs text-muted-fg space-y-1 border-t border-border-main pt-3 mt-2">
+                    <p className="font-medium text-ink-navy">How it works:</p>
+                    <p>1. Paste any product URL from a supported marketplace above</p>
+                    <p>2. Click <strong>Fetch</strong> — the system will automatically extract product information</p>
+                    <p>3. The Paste Text tab will be populated with extracted data</p>
+                    <p>4. Review the text, then click <strong>Run Compliance Scan</strong></p>
                   </div>
                 )}
               </div>
             )}
 
-            {/* IMAGE TAB */}
+            {/* IMAGE TAB — unchanged */}
             {tab === "image" && (
               <div className="space-y-4">
                 <label className="mono-label text-muted-fg block">Upload Label / Packaging Image</label>
@@ -249,7 +431,7 @@ export default function Check() {
             )}
           </div>
 
-          {/* Status / error */}
+          {/* Status / error — unchanged */}
           {status && !error && (
             <div className="mb-4 border border-[#16a34a]/30 bg-[#16a34a]/5 px-4 py-2 text-sm text-[#16a34a]">
               {status}
@@ -261,13 +443,13 @@ export default function Check() {
             </div>
           )}
 
-          {/* Run scan button */}
+          {/* Run scan button — unchanged */}
           <button
             onClick={handleScan}
             disabled={loading || text.trim().length < 10}
             className="w-full bg-ink-navy text-ink-light py-4 text-sm font-medium tracking-wide hover:bg-opacity-90 transition-all disabled:opacity-60 disabled:cursor-not-allowed lift"
           >
-            {loading ? (
+            {loading && tab !== "url" ? (
               <span className="animate-pulse">Analysing compliance…</span>
             ) : (
               "▶  Run Compliance Scan"
