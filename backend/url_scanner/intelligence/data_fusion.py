@@ -287,6 +287,10 @@ def fuse(
         adapter_data.get("storage_instructions", ""),
     )
     veg_status = ocr_entities.get("veg_status", "")
+    # Ingredient completeness — True/False/None (None = not yet assessed)
+    ingredient_complete = ocr_entities.get("ingredient_complete", None)
+
+
 
     # ── Normalize quantity ─────────────────────────────────────────────────────
     qty_for_norm = package_qty or website_qty
@@ -349,7 +353,9 @@ def fuse(
             "declarations": _extract_declarations(all_text),
         },
         "ingredients": ingredients,
+        "ingredient_complete": ingredient_complete,
         "allergen_info": allergen_info,
+
         "storage_instructions": storage_instructions,
         "images": adapter_data.get("images", []),
         "ocr_text": ocr_text,

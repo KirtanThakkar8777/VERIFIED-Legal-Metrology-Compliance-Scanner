@@ -209,16 +209,40 @@ def format_product(
         parts.append(f"Legal Declarations:\n" + "\n".join(decls) + "\n")
 
     # ── INGREDIENTS ────────────────────────────────────────────────────────────
+    parts.append(_section("INGREDIENTS"))
     ingredients = model.get("ingredients", "")
+    ingredient_complete = model.get("ingredient_complete", None)   # True/False/None
+    ingredient_source   = model.get("ingredient_source_image", "")  # e.g. "Image #4"
+
     if ingredients:
-        parts.append(_section("INGREDIENTS"))
         parts.append(f"{ingredients}\n")
+
+        # Completeness indicator
+        if ingredient_complete is True:
+            parts.append("Completeness: COMPLETE\n")
+        elif ingredient_complete is False:
+            parts.append(
+                "Completeness: POSSIBLE TRUNCATION — the list may continue on another"
+                " panel or image. Upload packaging photos for full extraction.\n"
+            )
+        # else: None means completeness not yet determined — don't show
+
+        if ingredient_source:
+            parts.append(f"Source: {ingredient_source}\n")
+    else:
+        parts.append(
+            "Not Detected\n"
+            "Note: Ingredient declaration not found in any accessible product image.\n"
+            "If the product has a physical packaging label, upload it in the Label Image tab.\n"
+        )
 
     # ── ALLERGEN INFORMATION ───────────────────────────────────────────────────
     allergen = model.get("allergen_info", "")
     if allergen:
         parts.append(_section("ALLERGEN INFORMATION"))
         parts.append(f"{allergen}\n")
+
+
 
     # ── STORAGE INSTRUCTIONS ───────────────────────────────────────────────────
     storage = model.get("storage_instructions", "")
@@ -308,6 +332,65 @@ def format_product(
         "Note:\nAI/OCR extraction is an assistance mechanism. "
         "Manual verification required before making any legal compliance determination.\n"
     )
+
+    # ── EXTRACTION COMPLETENESS ────────────────────────────────────────────────
+    parts.append(_section("EXTRACTION COMPLETENESS"))
+
+    # Critical fields: manufacturer, net_qty, mrp, fssai, country_of_origin, dates
+    _critical_found   = []
+    _critical_missing = []
+
+    def _has(val: str) -> bool:
+        return bool((val or "").strip()) and val.strip().lower() not in ("not detected", "not found", "unknown")
+
+    mfr_name_c  = manufacturer.get("name", "") or manufacturer.get("address_raw", "")
+    origin_c    = origin.get("declared_country", "") or origin.get("detected_country", "")
+    mrp_c       = (commerce.get("mrp_normalized") or {}).get("display", "") or commerce.get("mrp_raw", "")
+    qty_c       = qty.get("package_raw", "") or qty.get("website_raw", "")
+    fssai_c     = reg.get("fssai", "")
+    expiry_c    = dates.get("expiry_date", "")
+    mfg_date_c  = dates.get("mfg_date", "")
+    barcode_c   = reg.get("barcode", "")
+
+    for label, val in [
+        ("Manufacturer",    mfr_name_c),
+        ("Net Quantity",    qty_c),
+        ("MRP",             mrp_c),
+        ("Country",         origin_c),
+        ("FSSAI",           fssai_c),
+        ("Expiry Date",     expiry_c),
+        ("Mfg Date",        mfg_date_c),
+    ]:
+        if _has(val):
+            _critical_found.append(label)
+        else:
+            _critical_missing.append(label)
+
+    total_critical  = len(_critical_found) + len(_critical_missing)
+    crit_pct        = int(100 * len(_critical_found) / max(1, total_critical))
+
+    parts.append(
+        f"Critical Fields: {len(_critical_found)}/{total_critical} ({crit_pct}%)\n"
+    )
+    if ocr_stats:
+        parts.append(
+            f"OCR Images Analysed: {ocr_stats.get('images_downloaded', 0)}\n"
+            f"OCR Characters Extracted: {ocr_stats.get('ocr_char_count', 0):,}\n"
+            f"Average OCR Confidence: {ocr_stats.get('avg_confidence', 0)*100:.0f}%\n"
+        )
+
+    if _critical_found:
+        parts.append(f"Found:   {' | '.join(_critical_found)}\n")
+    if _critical_missing:
+        parts.append(f"Missing: {' | '.join(_critical_missing)}\n")
+        if barcode_c:
+            parts.append(f"Barcode: {barcode_c}  (Barcode found — additional data may be available)\n")
+
+    if crit_pct < 60:
+        parts.append(
+            "Note: Critical field coverage is below 60%. "
+            "Upload packaging photos in the Label Image tab for complete extraction.\n"
+        )
 
     # ── Source marker for compliance engine ────────────────────────────────────
     parts.append(

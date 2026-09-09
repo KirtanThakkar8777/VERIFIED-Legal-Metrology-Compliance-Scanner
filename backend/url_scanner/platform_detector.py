@@ -29,8 +29,13 @@ PLATFORMS = [
     ("healthkart",     "HealthKart"),
 ]
 
-# JS-heavy platforms that need headless browser for real data
-JS_HEAVY = {"Meesho", "Myntra", "Blinkit", "Zepto", "Swiggy Instamart", "Tata Cliq", "AJIO"}
+# JS-heavy platforms that need headless browser for real product images
+# These are React/Angular SPAs — static HTML has 0 product images
+JS_HEAVY = {
+    "Flipkart", "Meesho", "Myntra", "JioMart", "BigBasket",
+    "Blinkit", "Zepto", "Swiggy Instamart", "Tata Cliq", "AJIO",
+    "Nykaa", "FirstCry",
+}
 
 # Private / internal IP ranges
 _PRIVATE_RANGES = [

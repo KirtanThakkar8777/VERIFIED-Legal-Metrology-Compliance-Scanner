@@ -150,12 +150,64 @@ _MRP_PATTERNS = [
 ]
 
 # ── FSSAI patterns ────────────────────────────────────────────────────────────
+# FSSAI licence numbers are always exactly 14 digits starting with 1-9.
+# OCR may introduce spaces within the number or confuse O/0, I/1, l/1.
+# NOTE: Use raw strings with SINGLE backslash escapes — double-backslash breaks them.
 
 _FSSAI_PATTERNS = [
-    re.compile(r"FSSAI\s*(?:Lic(?:ence|ense)?\.?\s*No\.?|License\s*No\.?|Lic\.?\s*No\.?|#)?\s*[:\-]?\s*([1-9]\d{13})", re.IGNORECASE),
-    re.compile(r"(?:Lic(?:ence)?\.?\s*No\.?)\s*([1-9]\d{13})", re.IGNORECASE),
-    re.compile(r"\b([1-9]\d{13})\b"),  # Raw 14-digit number
+    # Pattern 1: "FSSAI Lic. No.: 12345678901234" or "FSSAI License No 12345678901234"
+    re.compile(
+        r"FSSAI\s*(?:Lic(?:ence|ense)?\.?\s*No\.?|License\s*No\.?|Lic\.?\s*No\.?|"
+        r"#|Reg\.?\s*No\.?|Licence\s*Number|License\s*Number)?\s*[:\-]?\s*"
+        r"([1-9][\d\s]{12,17}\d)",
+        re.IGNORECASE,
+    ),
+    # Pattern 2: "Lic. No. 12345678901234" (without explicit FSSAI keyword)
+    re.compile(
+        r"Lic(?:ence|ense)?\.?\s*No\.?\s*[:\-]?\s*([1-9][\d\s]{12,17}\d)",
+        re.IGNORECASE,
+    ),
+    # Pattern 3: Licence Number label
+    re.compile(
+        r"Licen[sc]e\s*(?:No\.?|Number)\s*[:\-]?\s*([1-9][\d\s]{12,17}\d)",
+        re.IGNORECASE,
+    ),
+    # Pattern 4: "FSSAI" anywhere near a 14-digit number (within next 60 chars)
+    re.compile(r"FSSAI[^\d]{0,50}([1-9]\d{13})", re.IGNORECASE | re.DOTALL),
+    # Pattern 5: Raw 14-digit number on its own line (standalone licence number)
+    re.compile(r"(?:^|\n)\s*([1-9]\d{13})\s*(?:\n|$)", re.MULTILINE),
+    # Pattern 6: OCR with spaces — "1 1521 9980 0076 9" → compact
+    re.compile(r"\b([1-9][\d\s]{14,20}\d)\b"),
+    # Pattern 7: 14-digit block anywhere in text (less specific, last resort)
+    re.compile(r"\b([1-9]\d{13})\b"),
 ]
+
+# FSSAI signal words — text near these suggests nearby number is a licence number
+_FSSAI_CONTEXT = re.compile(
+    r"FSSAI|Lic(?:ence|ense)?\.?\s*No|Licence\s*Number|License\s*Number|"
+    r"Food\s*Safety|FSSAI\s*Logo",
+    re.IGNORECASE,
+)
+
+
+def _clean_fssai(raw: str) -> str:
+    """Clean up an FSSAI number candidate — remove spaces/hyphens, validate length.
+    Also fixes common OCR misreads: O→0, I→1, l→1, S→5.
+    """
+    # Fix common OCR character substitutions
+    cleaned = raw.strip()
+    cleaned = re.sub(r"[^\dOIlSs\s\-]", "", cleaned)  # keep only digits + common misreads
+    cleaned = cleaned.replace("O", "0").replace("o", "0")
+    cleaned = cleaned.replace("I", "1").replace("l", "1")
+    cleaned = cleaned.replace("S", "5").replace("s", "5")  # only in numeric context
+    cleaned = re.sub(r"[\s\-]", "", cleaned)  # remove spaces and hyphens
+
+    if len(cleaned) == 14 and cleaned[0] != "0":
+        # Sanity check: must start with 1-9 (Indian FSSAI always starts with 1)
+        if cleaned[0] in "123456789":
+            return cleaned
+    return ""
+
 
 # ── Date patterns ─────────────────────────────────────────────────────────────
 
@@ -184,11 +236,56 @@ _CONSUMER_CARE_PATTERNS = [
 ]
 
 # ── Ingredients patterns ──────────────────────────────────────────────────────
+# Heading variants (including common OCR errors and Indian packaging variants):
+#   INGREDlENTS (l vs I), INGRED1ENTS (1 vs I), INGREDIANTS (misspelling)
+#   COMPOSITION, MADE FROM, MADE WITH, PREPARED FROM, CONTENT
+# The stop-group prevents the ingredient text from bleeding into a Nutrition section.
+_STOP_GROUP = (
+    r"(?=\n\n"
+    r"|\nALLERGEN"
+    r"|\nNUTRITION"
+    r"|\nSTORAGE"
+    r"|\nCALORIES?"
+    r"|\nENERGY\s*[:\-]?"
+    r"|\nTOTAL\s+(?:FAT|CARB|PROTEIN)"
+    r"|\nAMOUNT\s+PER"
+    r"|$)"
+)
 
 _INGREDIENTS_PATTERNS = [
-    re.compile(r"INGREDIENTS?\s*[:\-]?\s*(.{20,1000}?)(?=\n\n|\nALLERGEN|\nNUTRITION|\nSTORAGE|$)", re.IGNORECASE | re.DOTALL),
-    re.compile(r"CONTAINS?\s*[:\-]\s*(.{10,400}?)(?=\n\n|\nALLERGEN|$)", re.IGNORECASE | re.DOTALL),
+    # Standard "INGREDIENTS:" heading (most common)
+    re.compile(
+        r"INGREDIENT[S]?\s*[:\-.]?\s*(.{20,2000}?)" + _STOP_GROUP,
+        re.IGNORECASE | re.DOTALL,
+    ),
+    # OCR fuzzy: INGREDIANTS / INGREDENTS / INGREDlENTS / INGRED1ENTS
+    re.compile(
+        r"INGRED(?:I[1lL]|IE|IA)ENTS?\s*[:\-.]?\s*(.{20,2000}?)" + _STOP_GROUP,
+        re.IGNORECASE | re.DOTALL,
+    ),
+    # COMPOSITION: (common on Indian and European packaging)
+    re.compile(
+        r"COMPOSITION\s*[:\-.]?\s*(.{20,2000}?)" + _STOP_GROUP,
+        re.IGNORECASE | re.DOTALL,
+    ),
+    # MADE FROM: / MADE WITH:
+    re.compile(
+        r"MADE\s+(?:FROM|WITH)\s*[:\-.]?\s*(.{20,2000}?)" + _STOP_GROUP,
+        re.IGNORECASE | re.DOTALL,
+    ),
+    # PREPARED FROM:
+    re.compile(
+        r"PREPARED\s+FROM\s*[:\-.]?\s*(.{20,2000}?)" + _STOP_GROUP,
+        re.IGNORECASE | re.DOTALL,
+    ),
+    # CONTAINS: followed by a food ingredient list (not "Contains Milk" allergen)
+    re.compile(
+        r"CONTAINS\s*[:\-]\s*((?:[A-Z][a-zA-Z\s,\(\)%\d\.]+){20,600}?)" + _STOP_GROUP,
+        re.IGNORECASE | re.DOTALL,
+    ),
 ]
+
+
 
 _ALLERGEN_PATTERNS = [
     re.compile(r"ALLERGEN\s*(?:INFORMATION|INFO\.?)?\s*[:\-]?\s*(.{5,300}?)(?=\n\n|\nSTORAGE|\nNUTRITION|$)", re.IGNORECASE | re.DOTALL),
@@ -223,6 +320,37 @@ def _first_match(text: str, patterns: list[re.Pattern], group: int = 1) -> str:
             except IndexError:
                 pass
     return ""
+
+
+# ── Ingredient completeness helper ───────────────────────────────────────────
+
+_TRUNCATION_SIGNALS = re.compile(
+    r"(?:,\s*$"              # ends with comma  -> "Oats, Wheat,"
+    r"|\band\s*$"            # ends with "and"  -> "Oats and"
+    r"|\(\s*$"               # ends with "("    -> "Oats (25"
+    r"|\d+\.?\d*\s*%?\s*$"   # ends with a bare number/percentage
+    r"|\d+\s*$)",            # ends with just digits
+    re.IGNORECASE,
+)
+
+
+def _check_ingredient_completeness(ingredient_text: str) -> bool:
+    """
+    Return True if the ingredient list appears complete, False if truncated.
+
+    A list is INCOMPLETE when it ends with:
+    - A comma  ("Oats, Wheat, Millets,")
+    - 'and'    ("Oats and")
+    - Open parenthesis  ("Glucose (")
+    - A bare number or percentage  ("25" or "25%")
+
+    A list is COMPLETE when it ends with a full stop, closing parenthesis,
+    or a recognisable ingredient word token.
+    """
+    if not ingredient_text:
+        return False
+    tail = ingredient_text.strip()[-80:]   # inspect last 80 chars
+    return not bool(_TRUNCATION_SIGNALS.search(tail))
 
 
 # ── Main extraction function ──────────────────────────────────────────────────
@@ -302,8 +430,15 @@ def extract_entities(ocr_text: str) -> dict:
             del entities["mrp"]
 
     # ── FSSAI ─────────────────────────────────────────────────────────────────
-    fssai = _first_match(text, _FSSAI_PATTERNS)
-    if fssai and len(fssai) == 14:
+    fssai = ""
+    for pat in _FSSAI_PATTERNS:
+        m = pat.search(text)
+        if m:
+            candidate = _clean_fssai(m.group(1))
+            if candidate:
+                fssai = candidate
+                break
+    if fssai:
         entities["fssai"] = fssai
 
     # ── Dates ─────────────────────────────────────────────────────────────────
@@ -324,10 +459,16 @@ def extract_entities(ocr_text: str) -> dict:
     if coo:
         entities["country_of_origin"] = coo.strip()
 
+
     # ── Ingredients ───────────────────────────────────────────────────────────
     ingredients = _first_match(text, _INGREDIENTS_PATTERNS)
     if ingredients:
-        entities["ingredients"] = _clean_entity_text(ingredients, max_len=1000)
+        cleaned_ing = _clean_entity_text(ingredients, max_len=2000)
+        entities["ingredients"] = cleaned_ing
+        # Completeness check — detect truncated lists
+        entities["ingredient_complete"] = _check_ingredient_completeness(cleaned_ing)
+
+
 
     # ── Allergens ─────────────────────────────────────────────────────────────
     allergens = _first_match(text, _ALLERGEN_PATTERNS)

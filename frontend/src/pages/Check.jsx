@@ -84,6 +84,215 @@ function ScanProgress({ steps, platform, status }) {
   );
 }
 
+// ── OCR Image Card ─────────────────────────────────────────────────────────────
+// Compliance signal pill definitions — maps signal key → display label
+const SIGNAL_PILLS = [
+  { key: "has_fssai",        label: "FSSAI",    color: "bg-green-100 text-green-800 border-green-300" },
+  { key: "has_mrp",          label: "MRP",      color: "bg-blue-100  text-blue-800  border-blue-300"  },
+  { key: "has_manufacturer", label: "Mfr.",     color: "bg-blue-100  text-blue-800  border-blue-300"  },
+  { key: "has_net_qty",      label: "Net Qty",  color: "bg-blue-100  text-blue-800  border-blue-300"  },
+  { key: "has_consumer_care",label: "Consumer", color: "bg-slate-100 text-slate-700 border-slate-300" },
+  { key: "has_date_batch",   label: "Date/Lot", color: "bg-slate-100 text-slate-700 border-slate-300" },
+  { key: "has_country",      label: "Origin",   color: "bg-slate-100 text-slate-700 border-slate-300" },
+];
+
+function OcrImageCard({ img, rank, onClick }) {
+  const [failed, setFailed]       = useState(false);
+  const [showReason, setShowReason] = useState(false);
+
+  const score   = img.score   ?? null;
+  const reason  = img.reason  ?? "";
+  const signals = img.ocr_signals ?? {};
+
+  // Active signal pills (only show what was actually detected)
+  const activePills = SIGNAL_PILLS.filter(p => signals[p.key]);
+  const isMarketingOnly = signals.is_marketing_only;
+
+  return (
+    <div className="group relative border border-border-main bg-ledger flex flex-col overflow-hidden
+                    transition-all duration-200 hover:shadow-md hover:border-ink-navy/40 hover:-translate-y-0.5">
+
+      {/* Clickable image area */}
+      <div
+        className="relative bg-[#f5f2ec] flex items-center justify-center cursor-pointer"
+        style={{ aspectRatio: "1 / 1" }}
+        onClick={() => !failed && onClick(img.url)}
+        title={failed ? "Image unavailable" : `Click to enlarge — OCR Image ${String(rank).padStart(2, "0")}`}
+      >
+        {failed ? (
+          <div className="flex flex-col items-center justify-center gap-1 px-2 py-4 text-center w-full h-full">
+            <span className="text-2xl">📷</span>
+            <p className="text-[10px] font-mono text-muted-fg leading-tight">IMAGE<br/>UNAVAILABLE</p>
+          </div>
+        ) : (
+          <>
+            <img
+              src={img.url}
+              alt={`OCR Image ${String(rank).padStart(2, "0")}`}
+              onError={() => setFailed(true)}
+              className="w-full h-full object-contain"
+              loading="lazy"
+            />
+            {/* Hover overlay */}
+            <div className="absolute inset-0 bg-ink-navy/0 group-hover:bg-ink-navy/60 transition-all duration-200
+                            flex items-center justify-center opacity-0 group-hover:opacity-100">
+              <span className="mono-label text-ink-light text-[10px] tracking-widest border border-ink-light/60 px-2 py-1">
+                VIEW IMAGE
+              </span>
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* Compliance signal pills */}
+      {(activePills.length > 0 || isMarketingOnly) && (
+        <div className="flex flex-wrap gap-0.5 px-2 pt-1.5">
+          {activePills.map(p => (
+            <span key={p.key}
+              className={`inline-block text-[8px] font-mono font-semibold px-1 py-0.5 border rounded-sm ${p.color}`}>
+              {p.label} ✓
+            </span>
+          ))}
+          {isMarketingOnly && (
+            <span className="inline-block text-[8px] font-mono font-semibold px-1 py-0.5 border rounded-sm
+                             bg-red-50 text-red-700 border-red-300">
+              MARKETING ✗
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Footer: label + score + why-selected toggle */}
+      <div className="px-2 pt-1.5 pb-1 border-t border-border-main bg-card-bg mt-auto">
+        <div className="flex items-center justify-between">
+          <p className="mono-label text-muted-fg text-[10px] tracking-wider">
+            OCR IMAGE {String(rank).padStart(2, "0")}
+          </p>
+          {score !== null && (
+            <span className="text-[10px] font-mono text-ink-navy font-semibold">
+              {score > 0 ? "+" : ""}{score}
+            </span>
+          )}
+        </div>
+
+        {/* Collapsible "Why selected?" */}
+        {reason && (
+          <div className="mt-0.5">
+            <button
+              className="text-[9px] font-mono text-muted-fg hover:text-ink-navy transition-colors underline decoration-dotted"
+              onClick={(e) => { e.stopPropagation(); setShowReason(r => !r); }}
+            >
+              {showReason ? "▲ hide" : "▾ why selected?"}
+            </button>
+            {showReason && (
+              <p className="text-[9px] font-mono text-muted-fg mt-0.5 leading-tight break-words">
+                {reason}
+              </p>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+// ── OCR Image Panel ────────────────────────────────────────────────────────────
+function OcrImagePanel({ images, scanStatus, onOpenLightbox }) {
+  if (!images || images.length === 0) return null;
+
+  const isOcrRunning = scanStatus === "processing";
+
+  return (
+    <div className="border border-border-main bg-card-bg p-4 mt-3">
+      {/* Header */}
+      <div className="flex items-center justify-between mb-3">
+        <p className="mono-label text-muted-fg text-xs">OCR SELECTED IMAGES</p>
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] font-mono text-muted-fg">
+            {images.length} image{images.length !== 1 ? "s" : ""}
+          </span>
+          {isOcrRunning && (
+            <span className="mono-label text-[10px] text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5">
+              ⟳ OCR RUNNING
+            </span>
+          )}
+          {!isOcrRunning && (
+            <span className="mono-label text-[10px] text-[#16a34a] bg-[#16a34a]/5 border border-[#16a34a]/30 px-1.5 py-0.5">
+              ✓ OCR COMPLETE
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Image grid — 4 col desktop, 2 col tablet, 1 col mobile */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        {images.map((img) => (
+          <OcrImageCard
+            key={img.rank}
+            img={img}
+            rank={img.rank}
+            onClick={onOpenLightbox}
+          />
+        ))}
+      </div>
+
+      <p className="text-[10px] text-muted-fg font-mono mt-2">
+        These are the exact images being analysed by OCR for compliance data extraction.
+      </p>
+    </div>
+  );
+}
+
+// ── Lightbox ───────────────────────────────────────────────────────────────────
+function Lightbox({ url, onClose }) {
+  // Close on Escape key
+  useEffect(() => {
+    const handler = (e) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
+
+  if (!url) return null;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-ink-navy/80 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        className="relative max-w-4xl max-h-[90vh] mx-4 bg-ledger border border-border-main shadow-2xl flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Lightbox header */}
+        <div className="flex items-center justify-between px-4 py-2 border-b border-border-main">
+          <p className="mono-label text-muted-fg text-xs">PACKAGING IMAGE DETAIL</p>
+          <button
+            onClick={onClose}
+            className="mono-label text-xs text-ink-navy hover:text-[#C41E3A] transition-colors px-2 py-1 border border-border-main hover:border-[#C41E3A]/40"
+          >
+            ✕ CLOSE
+          </button>
+        </div>
+        {/* Image */}
+        <div className="flex-1 overflow-auto p-4 flex items-center justify-center bg-[#f5f2ec]">
+          <img
+            src={url}
+            alt="Packaging detail"
+            className="max-w-full max-h-[75vh] object-contain"
+          />
+        </div>
+        {/* Footer hint */}
+        <div className="px-4 py-2 border-t border-border-main">
+          <p className="text-[10px] text-muted-fg font-mono">
+            Click outside or press Esc to close · Inspect for manufacturer, FSSAI, MRP, net weight, etc.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function Check() {
   const navigate = useNavigate();
 
@@ -101,17 +310,50 @@ export default function Check() {
   const fileRef = useRef(null);
 
   // ── New URL scanner state ──────────────────────────────────────────────────
-  const [scanId, setScanId]         = useState(null);
-  const [scanSteps, setScanSteps]   = useState([]);
-  const [scanStatus, setScanStatus] = useState("");
-  const [scanPlatform, setScanPlatform] = useState("");
+  const [scanId, setScanId]               = useState(null);
+  const [scanSteps, setScanSteps]         = useState([]);
+  const [scanStatus, setScanStatus]       = useState("");
+  const [scanPlatform, setScanPlatform]   = useState("");
   const [fetchBtnLabel, setFetchBtnLabel] = useState("Fetch");
+  const [ocrSelectedImages, setOcrSelectedImages] = useState([]); // ← single source of truth
+  const [lightboxImage, setLightboxImage] = useState(null);       // ← enlarged preview
   const pollRef = useRef(null);
 
   // Clear poll on unmount
   useEffect(() => {
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, []);
+
+  // ── Auto-detect platform from URL as user types ───────────────────────────
+  const detectPlatformFromUrl = (inputUrl) => {
+    if (!inputUrl) return;
+    try {
+      const host = new URL(inputUrl).hostname.toLowerCase();
+      const PLATFORM_MAP = [
+        ["amazon",    "Amazon"],
+        ["flipkart",  "Flipkart"],
+        ["myntra",    "Myntra"],
+        ["meesho",    "Meesho"],
+        ["snapdeal",  "Snapdeal"],
+        ["jiomart",   "JioMart"],
+        ["bigbasket", "BigBasket"],
+        ["blinkit",   "Blinkit"],
+        ["zepto",     "Zepto"],
+        ["nykaa",     "Nykaa"],
+        ["healthkart","HealthKart"],
+        ["ajio",      "Ajio"],
+        ["tatacliq",  "TataCLiQ"],
+        ["swiggy",    "Swiggy Instamart"],
+        ["purplle",   "Purplle"],
+      ];
+      for (const [key, label] of PLATFORM_MAP) {
+        if (host.includes(key)) {
+          setPlatform(label);
+          return;
+        }
+      }
+    } catch (_) {}
+  };
 
   // ── Poll progress until done ───────────────────────────────────────────────
   const startPolling = useCallback((id) => {
@@ -124,15 +366,23 @@ export default function Check() {
         setScanStatus(data.status);
         setScanPlatform(data.platform || "");
 
+        // ── Show OCR images as soon as selection completes (before OCR finishes)
+        if (data.ocr_selected_images?.length > 0) {
+          setOcrSelectedImages(data.ocr_selected_images);
+        }
+
         if (data.status === "done") {
           clearInterval(pollRef.current);
-          // Fetch result
+          // Fetch full result
           const res = await api.get(`/api/url-scan/${id}/result`);
           const result = res.data;
 
           setText(result.formatted_text);
-          if (!productName) setProductName(result.product_name || "");
-          if (!platform)   setPlatform(result.platform || "");
+
+          // ── Auto-fill metadata fields ─────────────────────────────────
+          if (result.product_name) setProductName(result.product_name);
+          if (result.category)     setCategory(result.category);
+          if (result.platform)     setPlatform(result.platform);
 
           setTab("text");
           setFetchBtnLabel("Fetch Again");
@@ -151,7 +401,7 @@ export default function Check() {
         setLoading(false);
       }
     }, 1500);
-  }, [productName, platform]);
+  }, []);
 
   // ── Upgraded Fetch handler ─────────────────────────────────────────────────
   const handleFetchUrl = async () => {
@@ -181,6 +431,8 @@ export default function Check() {
     setScanSteps([]);
     setScanStatus("processing");
     setScanPlatform("Detecting...");
+    setOcrSelectedImages([]);   // clear previous scan's images
+    setLightboxImage(null);
     setLoading(true);
     setFetchBtnLabel("⟳ Fetching...");
 
@@ -258,21 +510,39 @@ export default function Check() {
             </p>
           </div>
 
-          {/* Optional metadata — unchanged */}
+          {/* Metadata fields — auto-filled from URL scan */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6">
             {[
-              { label: "Product Name", value: productName, set: setProductName, placeholder: "e.g. Surf Excel Matic" },
-              { label: "Category",     value: category,    set: setCategory,    placeholder: "e.g. Detergent" },
-              { label: "Platform",     value: platform,    set: setPlatform,    placeholder: "e.g. Amazon" },
+              { label: "Product Name", value: productName, set: setProductName, placeholder: "e.g. Surf Excel Matic", autoKey: "productName" },
+              { label: "Category",     value: category,    set: setCategory,    placeholder: "e.g. Detergent",       autoKey: "category" },
+              { label: "Platform",     value: platform,    set: setPlatform,    placeholder: "e.g. Amazon",          autoKey: "platform" },
             ].map((f) => (
               <div key={f.label}>
-                <label className="mono-label text-muted-fg mb-1 block">{f.label}</label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="mono-label text-muted-fg">{f.label}</label>
+                  {f.value && scanStatus === "done" && (
+                    <span className="text-[10px] font-mono text-[#16a34a] bg-[#16a34a]/10 px-1.5 py-0.5 rounded-sm">
+                      ✓ auto-filled
+                    </span>
+                  )}
+                  {f.label === "Platform" && f.value && scanStatus !== "done" && (
+                    <span className="text-[10px] font-mono text-seal-gold bg-seal-gold/10 px-1.5 py-0.5 rounded-sm">
+                      ✓ detected
+                    </span>
+                  )}
+                </div>
                 <input
                   type="text"
                   value={f.value}
                   onChange={(e) => f.set(e.target.value)}
                   placeholder={f.placeholder}
-                  className="w-full border border-border-main bg-card-bg px-3 py-2 text-sm text-ink-navy placeholder:text-muted-fg focus:outline-none focus:border-ink-navy font-mono"
+                  className={`w-full border px-3 py-2 text-sm text-ink-navy placeholder:text-muted-fg focus:outline-none font-mono transition-colors ${
+                    f.value && scanStatus === "done"
+                      ? "border-[#16a34a]/50 bg-[#16a34a]/5 focus:border-[#16a34a]"
+                      : f.label === "Platform" && f.value
+                      ? "border-seal-gold/40 bg-seal-gold/5 focus:border-seal-gold"
+                      : "border-border-main bg-card-bg focus:border-ink-navy"
+                  }`}
                 />
               </div>
             ))}
@@ -337,7 +607,10 @@ export default function Check() {
                   <input
                     type="url"
                     value={url}
-                    onChange={(e) => setUrl(e.target.value)}
+                    onChange={(e) => {
+                      setUrl(e.target.value);
+                      detectPlatformFromUrl(e.target.value);
+                    }}
                     onKeyDown={(e) => e.key === "Enter" && !loading && url && handleFetchUrl()}
                     placeholder="https://www.flipkart.com/... or https://www.amazon.in/..."
                     className="flex-1 border border-border-main bg-ledger px-3 py-2.5 text-sm text-ink-navy placeholder:text-muted-fg font-mono focus:outline-none focus:border-ink-navy"
@@ -369,7 +642,16 @@ export default function Check() {
                   />
                 )}
 
-                {/* Extracted text preview (only after fetch, before tab switch) */}
+                {/* ── OCR Image Preview Panel ──────────────────────────────────
+                    Appears as soon as images are selected (before OCR finishes).
+                    Displays the EXACT same images the OCR pipeline receives.    */}
+                <OcrImagePanel
+                  images={ocrSelectedImages}
+                  scanStatus={scanStatus}
+                  onOpenLightbox={setLightboxImage}
+                />
+
+                {/* Extracted text notice (only after fetch completes) */}
                 {text && scanStatus === "done" && (
                   <div className="border border-[#16a34a]/30 bg-[#16a34a]/5 px-4 py-3 text-xs text-[#16a34a]">
                     ✓ Extracted data has been loaded into the Paste Text tab.
@@ -458,6 +740,11 @@ export default function Check() {
         </div>
       </main>
       <SiteFooter />
+
+      {/* Lightbox — full-screen image preview, rendered at page root to overlay everything */}
+      {lightboxImage && (
+        <Lightbox url={lightboxImage} onClose={() => setLightboxImage(null)} />
+      )}
     </div>
   );
 }
