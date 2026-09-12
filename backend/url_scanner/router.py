@@ -63,6 +63,7 @@ class ResultResponse(BaseModel):
     status: str
     platform: str
     formatted_text: str
+    compliance_text: str = ""          # raw combined text for compliance engine
     product_name: str
     category: str
     images_found: int
@@ -246,29 +247,96 @@ async def _run_scan(scan_id: str, url: str) -> None:
             try:
                 from url_scanner.browser_fetcher import fetch_rendered_page
                 browser_result = await asyncio.wait_for(
-                    fetch_rendered_page(url, timeout_s=35.0),
-                    timeout=45.0,
+                    fetch_rendered_page(url, timeout_s=60.0),
+                    timeout=70.0,
                 )
                 browser_imgs = browser_result.get("images", [])
+                rendered_html = browser_result.get("html", "")
+                html_size = len(rendered_html)
+
+                # Server-side log to diagnose bot-block vs actual 0 images
+                import sys as _sys2
+                _enc2 = getattr(_sys2.stdout, 'encoding', 'utf-8') or 'utf-8'
+                _msg = (f"[BROWSER FETCH] html={html_size:,}B  "
+                        f"images={len(browser_imgs)}  "
+                        f"colorImages={'YES' if 'colorImages' in rendered_html else 'NO'}")
+                print(_msg.encode(_enc2, errors='replace').decode(_enc2))
+
+                if html_size < 10_000:
+                    _add_step(scan_id, f"⚠ Browser got small page ({html_size:,} bytes) — Amazon bot-block")
+
                 for img in browser_imgs:
-                    if img["url"] not in seen_img_urls:
+                    if img.get("url") and img["url"] not in seen_img_urls:
                         all_images.append(img)
                         seen_img_urls.add(img["url"])
 
-                # Re-parse rendered HTML for more images
-                rendered_html = browser_result.get("html", "")
-                if rendered_html and len(rendered_html) > 3000:
+                # Do NOT re-run collect_images on rendered_html for Amazon —
+                # browser_fetcher already called _extract_amazon_gallery_images on it.
+                is_amazon_url = "amazon." in url.lower()
+                if not is_amazon_url and rendered_html and html_size > 3000:
                     extra = collect_images(rendered_html, browser_result.get("final_url", url))
                     for img in extra:
-                        if img["url"] not in seen_img_urls:
+                        if img.get("url") and img["url"] not in seen_img_urls:
                             all_images.append(img)
                             seen_img_urls.add(img["url"])
 
                 browser_used = True
+
+                # ── CRITICAL: Re-extract ALL metadata from browser HTML ────────
+                # The static fetch returned Amazon's CAPTCHA page (3,793 bytes)
+                # with no product data. The browser got the real 2MB+ rendered page.
+                # Re-run the full extraction pipeline on the browser HTML so that
+                # product name, manufacturer, MRP, FSSAI, country, etc. are found.
+                if rendered_html and html_size > 50_000:
+                    try:
+                        from bs4 import BeautifulSoup as _BS
+                        from url_scanner.structured_extractor import extract_structured_data as _esd
+
+                        _add_step(scan_id, "⟳ Re-extracting product data from browser page...", done=False)
+
+                        browser_soup     = _BS(rendered_html, "lxml")
+                        browser_full_text = browser_soup.get_text(" ", strip=True)
+                        browser_structured = _esd(rendered_html)
+                        browser_adapter_data = adapter_extract(browser_soup, browser_full_text)
+
+                        # Update full_text and soup with browser data (always richer)
+                        if len(browser_full_text) > len(full_text):
+                            full_text = browser_full_text
+                            soup = browser_soup
+
+                        # Merge structured — browser data wins for fields that were empty
+                        for k, v in browser_structured.items():
+                            if v and not structured.get(k):
+                                structured[k] = v
+
+                        # Merge adapter data — always take browser values for key fields
+                        for k, v in browser_adapter_data.items():
+                            if v and not adapter_data.get(k):
+                                adapter_data[k] = v
+                            elif v and k in ("product_name", "brand", "mrp",
+                                             "manufacturer_raw", "packer_raw",
+                                             "country_of_origin", "fssai",
+                                             "description", "price_block",
+                                             "feature_bullets"):
+                                adapter_data[k] = v  # always overwrite with browser data
+
+                        web_name_new = adapter_data.get("product_name") or structured.get("name") or ""
+                        job["steps"][-1]["done"] = True
+                        job["steps"][-1]["label"] = (
+                            f"✓ Browser product data extracted: {web_name_new[:50]}"
+                            if web_name_new else "✓ Browser product data extracted"
+                        )
+                    except Exception as _re_err:
+                        import traceback as _tb
+                        print(f"[BROWSER RE-EXTRACT ERROR] {_tb.format_exc()}")
+                        # Non-fatal — continue with whatever data we have
+
             except asyncio.TimeoutError:
                 _add_step(scan_id, "⚠ Browser fetch timed out — continuing with available data")
             except Exception as e:
-                _add_step(scan_id, f"⚠ Browser fetch failed: {str(e)[:80]}")
+                import traceback
+                print(f"[BROWSER ERROR] {traceback.format_exc()}")
+                _add_step(scan_id, f"⚠ Browser fetch failed: {str(e)[:120]}")
 
         job["steps"][-1]["done"] = True
         if len(all_images) == 0:
@@ -281,6 +349,19 @@ async def _run_scan(scan_id: str, url: str) -> None:
             )
         else:
             job["steps"][-1]["label"] = f"✓ {len(all_images)} product images found"
+
+        # ── Store ALL images immediately so frontend can show manual picker ─────
+        # Each image gets basic metadata; full scoring happens in Step 7.
+        job["all_images"] = [
+            {
+                "url": img.get("url", ""),
+                "alt": img.get("alt", ""),
+                "score": img.get("score", 0),
+                "source": img.get("source", "html"),
+            }
+            for img in all_images
+            if img.get("url")
+        ]
 
         # ── Step 7: Select packaging images for OCR ───────────────────────────
         # Three-stage compliance image scoring:
@@ -488,11 +569,11 @@ async def _run_scan(scan_id: str, url: str) -> None:
             if not _INGREDIENTS_PATTERN.search(text): missing.append("ingredients")
             return missing
 
-        selected_urls_set = set(packaging_urls)
+        # ── Field coverage summary (shown after OCR on the 4 selected images) ──
+        # No adaptive extension — we do exactly 4 images and stop.
         missing_fields = _check_missing_fields(combined_ocr_text)
         found_fields   = [f for f in _ALL_CRITICAL if f not in missing_fields]
 
-        # ── Field coverage matrix step (always shown after initial OCR) ────────
         _cov_found   = " | ".join(f.upper() for f in found_fields)   or "none"
         _cov_missing = " | ".join(f.upper() for f in missing_fields) or "none"
         _cov_pct     = int(100 * len(found_fields) / len(_ALL_CRITICAL))
@@ -501,90 +582,6 @@ async def _run_scan(scan_id: str, url: str) -> None:
             f"✓ Coverage after initial OCR: {_cov_pct}% — "
             f"FOUND: {_cov_found}  |  MISSING: {_cov_missing}"
         )
-
-
-        # ── Adaptive extension (field-type-routed while loop) ─────────────────
-        if missing_fields:
-            ocr_budget_used = len(packaging_urls)
-            MAX_OCR_BUDGET  = 7  # initial 4 + up to 3 adaptive images
-
-            remaining_pool = [
-                img for img in all_images
-                if img.get("url") not in selected_urls_set
-                and img.get("compliance_score", 0) > -50
-            ]
-
-            if remaining_pool and ocr_budget_used < MAX_OCR_BUDGET:
-                _add_step(
-                    scan_id,
-                    f"⟳ Searching for {', '.join(missing_fields)} in "
-                    f"{len(remaining_pool)} remaining candidate image(s)...",
-                    done=False,
-                )
-
-                last_fb_result: dict = {}
-
-                while missing_fields and remaining_pool and ocr_budget_used < MAX_OCR_BUDGET:
-                    # Re-rank per round so we always pick the image most likely to cover
-                    # THE SPECIFIC fields still missing (not just generic compliance score)
-                    routed = rank_for_missing_fields(
-                        remaining_pool,
-                        missing_fields,
-                        already_processed_urls=selected_urls_set,
-                    )
-                    if not routed:
-                        break
-
-                    fb_img = routed[0]
-                    remaining_pool = [
-                        img for img in remaining_pool
-                        if img.get("url") != fb_img.get("url")
-                    ]
-
-                    fb_result = await process_image(fb_img["url"], img_index=99)
-                    last_fb_result = fb_result
-                    selected_urls_set.add(fb_img["url"])
-
-                    if not fb_result.get("ocr_text"):
-                        continue  # image downloaded but no text — try next
-
-                    ocr_budget_used += 1
-                    combined_ocr_text += "\n\n" + fb_result["ocr_text"]
-
-                    fb_entities = extract_entities(fb_result["ocr_text"])
-                    for k, v in fb_entities.items():
-                        if v and not ocr_entities.get(k):
-                            ocr_entities[k] = v
-
-                    prev_missing   = list(missing_fields)
-                    missing_fields = _check_missing_fields(combined_ocr_text)
-                    newly_found    = [f for f in prev_missing if f not in missing_fields]
-
-                    job["ocr_selected_images"].append({
-                        "url": fb_img["url"],
-                        "rank": len(job["ocr_selected_images"]) + 1,
-                        "score": fb_img.get("compliance_score", 0),
-                        "reason": (
-                            f"Field-targeted — sought: {', '.join(prev_missing[:3])}; "
-                            f"found: {', '.join(newly_found) or 'none'}"
-                        ),
-                        "ocr_signals": fb_img.get("ocr_signals", {}),
-                    })
-
-                # Collect barcodes
-                for bc in last_fb_result.get("barcodes", []):
-                    if bc not in all_barcodes:
-                        all_barcodes.append(bc)
-
-                found_now = [f for f in _ALL_CRITICAL if f not in missing_fields]
-                _pct2 = int(100 * len(found_now) / len(_ALL_CRITICAL))
-                job["steps"][-1]["done"] = True
-                job["steps"][-1]["label"] = (
-                    f"✓ All critical fields found after {ocr_budget_used} images ({_pct2}%)"
-                    if not missing_fields else
-                    f"⚠ After {ocr_budget_used} images: still missing {', '.join(missing_fields)} "
-                    f"({_pct2}% coverage)"
-                )
 
 
 
@@ -687,8 +684,102 @@ async def _run_scan(scan_id: str, url: str) -> None:
 
         _add_step(scan_id, "✓ Extraction complete")
 
-        # ── Store result ──────────────────────────────────────────────────────
-        # Infer category from model data + URL hints
+        # ── Build compliance_text — canonical text for the compliance engine ──
+        # Rules.json patterns match phrases like "Manufactured by: X", "MRP: Rs. X"
+        # "FSSAI: 12345678901234", "Country of Origin: India" etc.
+        #
+        # We build this from the ALREADY-EXTRACTED model values, written in
+        # exactly the format the patterns expect. This avoids:
+        #   • "===" being matched as consumer care contact
+        #   • "INFORMATION" being matched as manufacturer name
+        #   • Random OCR noise from navigation / UI text
+        #
+        # Raw OCR text is appended at the end as a last resort for patterns
+        # the entity extractor may have missed.
+
+        _cp = []
+
+        # ── Manufacturer / Packer / Importer ─────────────────────────────────
+        _mfr  = model.get("manufacturer", {})
+        _pkr  = model.get("packer", {})
+        _imp  = model.get("importer", {})
+        _mfr_name = _mfr.get("name") or _mfr.get("address_raw") or adapter_data.get("manufacturer_raw") or ""
+        _pkr_name = _pkr.get("name") or _pkr.get("address_raw") or adapter_data.get("packer_raw") or ""
+        _imp_name = _imp.get("name") or _imp.get("address_raw") or ""
+        if _mfr_name: _cp.append(f"Manufactured by: {_mfr_name}")
+        if _pkr_name and _pkr_name != _mfr_name: _cp.append(f"Packed by: {_pkr_name}")
+        if _imp_name: _cp.append(f"Imported by: {_imp_name}")
+        # Fallback: feature bullets often contain "MKT. BY" text
+        for bullet in adapter_data.get("feature_bullets", []):
+            bl = bullet.strip()
+            if any(k in bl.lower() for k in ("manufactur", "packed by", "mkt. by", "marketed", "importer")):
+                _cp.append(bl)
+
+        # ── Net Quantity ──────────────────────────────────────────────────────
+        _qty = model.get("quantity", {})
+        _qty_val = _qty.get("package_raw") or _qty.get("website_raw") or adapter_data.get("Net Quantity") or ""
+        if _qty_val: _cp.append(f"Net Quantity: {_qty_val}")
+
+        # ── MRP ───────────────────────────────────────────────────────────────
+        _com = model.get("commerce", {})
+        _mrp_raw = _com.get("mrp_raw") or adapter_data.get("mrp") or adapter_data.get("price_block") or ""
+        _mrp_norm = _com.get("mrp_normalized", {})
+        if _mrp_norm.get("found") and _mrp_norm.get("amount"):
+            _cp.append(f"MRP: Rs. {_mrp_norm['amount']}")
+        elif _mrp_raw:
+            _cp.append(f"MRP: Rs. {_mrp_raw}")
+
+        # ── Dates ─────────────────────────────────────────────────────────────
+        _dates = model.get("dates", {})
+        if _dates.get("mfg_date"):      _cp.append(f"Mfg. Date: {_dates['mfg_date']}")
+        if _dates.get("packing_date"):  _cp.append(f"Packed on: {_dates['packing_date']}")
+        if _dates.get("expiry_date"):   _cp.append(f"Best Before: {_dates['expiry_date']}")
+        # Also add shelf life from adapter
+        if adapter_data.get("best_before"): _cp.append(f"Best Before: {adapter_data['best_before']}")
+
+        # ── Consumer Care ─────────────────────────────────────────────────────
+        _cc = model.get("consumer_care", {})
+        if _cc.get("raw"):    _cp.append(f"Consumer Care: {_cc['raw']}")
+        if _cc.get("phone"):  _cp.append(f"Consumer Care Helpline: {_cc['phone']}")
+        if _cc.get("email"):  _cp.append(f"Consumer Care Email: {_cc['email']}")
+        if adapter_data.get("consumer_care_phone"):
+            _cp.append(f"Consumer Care: {adapter_data['consumer_care_phone']}")
+
+        # ── Country of Origin ─────────────────────────────────────────────────
+        _orig = model.get("origin", {})
+        _country = _orig.get("declared_country") or _orig.get("detected_country") or adapter_data.get("country_of_origin") or ""
+        if _country: _cp.append(f"Country of Origin: {_country}")
+
+        # ── FSSAI ─────────────────────────────────────────────────────────────
+        _reg = model.get("regulatory", {})
+        _fssai_val = _reg.get("fssai") or adapter_data.get("fssai") or ""
+        if _fssai_val: _cp.append(f"FSSAI Licence No. {_fssai_val}")
+
+        # ── Ingredients ───────────────────────────────────────────────────────
+        _ing = model.get("ingredients", "")
+        if _ing: _cp.append(f"INGREDIENTS: {_ing}")
+
+        # ── Barcode ───────────────────────────────────────────────────────────
+        _bc = _reg.get("barcode", "")
+        if _bc: _cp.append(f"Barcode: {_bc}")
+
+        # ── Append raw OCR text as fallback for patterns we may have missed ──
+        # Cleaned: remove === lines, "Not Detected" lines, and very short lines
+        if combined_ocr_text:
+            _ocr_lines = []
+            for _ln in combined_ocr_text.splitlines():
+                _stripped = _ln.strip()
+                if (len(_stripped) > 8
+                        and not set(_stripped) <= set("=-_*#")
+                        and "Not Detected" not in _stripped
+                        and "INFORMATION" != _stripped):
+                    _ocr_lines.append(_stripped)
+            if _ocr_lines:
+                _cp.append("\n".join(_ocr_lines))
+
+        compliance_text = "\n".join(_cp)
+
+        # ── Infer category ────────────────────────────────────────────────────
         platform_info_with_url = {**platform_info, "url": url}
         inferred_category = _infer_category(model, platform_info_with_url)
 
@@ -697,7 +788,8 @@ async def _run_scan(scan_id: str, url: str) -> None:
             "scan_id": scan_id,
             "status": "done",
             "platform": platform_info["display_name"],
-            "formatted_text": formatted_text,
+            "formatted_text": formatted_text,    # for display in text tab
+            "compliance_text": compliance_text,   # for compliance engine — raw combined
             "product_name": model.get("product", {}).get("name", ""),
             "category": inferred_category,
             "images_found": len(all_images),
@@ -786,3 +878,95 @@ async def get_result(scan_id: str):
     if not result:
         raise HTTPException(500, "Scan completed but result is missing.")
     return ResultResponse(**result)
+
+
+# ── GET /api/url-scan/{id}/all-images ─────────────────────────────────────────
+
+@router.get("/{scan_id}/all-images")
+async def get_all_images(scan_id: str):
+    """
+    Return ALL images collected from the product page.
+    Used by the manual image picker UI so users can override algorithm selection.
+    Available as soon as Step 6 (image collection) completes.
+    """
+    job = _job(scan_id)
+    all_images = job.get("all_images", [])
+    ocr_selected = {img["url"] for img in job.get("ocr_selected_images", [])}
+
+    # Enrich with scoring info if available (after Step 7 completes)
+    return {
+        "scan_id": scan_id,
+        "total": len(all_images),
+        "images": [
+            {
+                **img,
+                "auto_selected": img["url"] in ocr_selected,
+            }
+            for img in all_images
+        ],
+    }
+
+
+# ── POST /api/url-scan/{id}/manual-ocr ───────────────────────────────────────
+
+class ManualOcrRequest(BaseModel):
+    image_urls: list[str]   # Up to 6 user-chosen URLs
+
+
+@router.post("/{scan_id}/manual-ocr")
+async def manual_ocr(scan_id: str, payload: ManualOcrRequest):
+    """
+    Run OCR on a user-selected list of image URLs and return
+    the compliance-formatted text.  Does NOT replace the original job result.
+    """
+    job = _job(scan_id)
+
+    if not payload.image_urls:
+        raise HTTPException(422, "No images selected.")
+    if len(payload.image_urls) > 8:
+        raise HTTPException(422, "Maximum 8 images allowed for manual OCR.")
+
+    # Validate URLs are from the same job's image pool (SSRF guard)
+    known_urls = {img["url"] for img in job.get("all_images", [])}
+    # Also allow URLs from the auto-selected set (in case all_images isn't populated yet)
+    known_urls |= {img["url"] for img in job.get("ocr_selected_images", [])}
+
+    invalid = [u for u in payload.image_urls if u not in known_urls]
+    if invalid:
+        raise HTTPException(422, f"URL(s) not from this scan's image pool: {invalid[:2]}")
+
+    # ── Run OCR pipeline on chosen images ─────────────────────────────────────
+    from url_scanner.image_processor import process_images_parallel
+    from url_scanner.intelligence.entity_extractor import extract_entities
+    from url_scanner.formatter import format_product
+    from url_scanner.intelligence.data_fusion import fuse
+    from url_scanner.intelligence.mismatch_detector import detect_mismatches
+
+    ocr_result = await process_images_parallel(payload.image_urls, max_images=8)
+    combined_ocr_text = ocr_result["combined_ocr_text"]
+    ocr_entities = extract_entities(combined_ocr_text) if combined_ocr_text else {}
+
+    # Get existing job result for platform / adapter data
+    existing_result = job.get("result", {})
+    existing_model  = existing_result.get("model", {})
+    platform_info   = {"display_name": job.get("platform", "Unknown"), "adapter_key": "generic"}
+
+    # Re-fuse with new OCR text
+    model = fuse(
+        existing_model.get("_adapter_data", {}),
+        ocr_text=combined_ocr_text,
+        structured=existing_model.get("_structured", {}),
+        ocr_entities=ocr_entities,
+    )
+
+    comparisons = detect_mismatches(model)
+    formatted_text = format_product(model, platform_info, [], comparisons)
+
+    return {
+        "scan_id": scan_id,
+        "images_processed": ocr_result["images_processed"],
+        "ocr_char_count": len(combined_ocr_text),
+        "avg_confidence": ocr_result["avg_confidence"],
+        "formatted_text": formatted_text,
+        "product_name": model.get("product", {}).get("name", existing_result.get("product_name", "")),
+    }

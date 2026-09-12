@@ -438,8 +438,11 @@ def _visual_score_sync(image_bytes: bytes) -> tuple[int, str, str]:
     Metrics used:
       - Aspect ratio  (packaging is usually portrait or square, not ultra-wide banners)
       - Pixel variance (high variance = photo/text; low variance = flat graphic)
+      - Edge density — primary proxy for text density
       - Colour histogram entropy (photos have diverse colours; logos/graphics are flat)
-      - Estimated text likelihood from edge density
+      - Text density ratio (% of image covered by text-like dark pixels on light bg)
+      - Barcode detection (thin vertical lines on white bg = barcode image)
+      - FSSAI certificate detector (small logo + text on white = FSSAI cert image)
       - Image size (larger = higher quality for OCR)
     """
     try:
@@ -495,38 +498,122 @@ def _visual_score_sync(image_bytes: bytes) -> tuple[int, str, str]:
         small = img.resize((64, 64), Image.LANCZOS)
         unique_colours = len(set(small.getdata()))
 
-        # ── Combined classifier: KEY FIX ──────────────────────────────────────
-        # High edge + low-medium colour = TEXT LABEL (back/declaration/nutrition)
-        if edge_mean > 20 and unique_colours < 1800:
+        # ── Text density ratio ────────────────────────────────────────────────
+        # Count pixels that look like dark text on a light background.
+        # Binarize gray image: pixels darker than 140 on a mostly-light image = text
+        gray_small = img.convert("L").resize((100, 100), Image.LANCZOS)
+        pixels_data = list(gray_small.getdata())
+        total_px = len(pixels_data)
+        dark_px  = sum(1 for p in pixels_data if p < 140)
+        light_px = sum(1 for p in pixels_data if p > 180)
+        text_density  = dark_px / total_px      # fraction of image that is dark text
+        bg_light_frac = light_px / total_px     # fraction that is white/light background
+
+        # ── Barcode detector ──────────────────────────────────────────────────
+        # A barcode image is: mostly white background + thin dense vertical dark lines
+        # Signature: bg_light_frac > 0.55, text_density 0.05–0.30, portrait/square ratio
+        # AND very regular edge pattern in horizontal direction (stripes)
+        is_barcode = False
+        if bg_light_frac > 0.55 and 0.05 < text_density < 0.35 and ratio <= 2.5:
+            # Check horizontal stripe regularity: sample a thin band across the center
+            # A barcode has alternating dark/light columns = many zero-crossings
+            center_row = [gray_small.getpixel((x, 50)) for x in range(100)]
+            crossings = sum(
+                1 for i in range(1, len(center_row))
+                if (center_row[i - 1] < 128) != (center_row[i] < 128)
+            )
+            if crossings >= 20:   # 20+ dark/light transitions across the center = barcode pattern
+                is_barcode = True
+                score += 55
+                reasons.append(
+                    f"BARCODE: {crossings} horizontal stripe transitions, "
+                    f"{text_density*100:.0f}% dark px on light bg (+55)"
+                )
+
+        # ── FSSAI Certificate / Declaration Panel detector ────────────────────
+        # FSSAI logo cards and regulatory declaration images are:
+        # small square/portrait, mostly white, small amount of dark text + logo
+        # text_density 0.02–0.12, very high light bg fraction > 0.70
+        is_fssai_cert = False
+        if (not is_barcode and bg_light_frac > 0.70
+                and 0.02 < text_density < 0.15
+                and 0.4 <= ratio <= 2.0
+                and pixels < 300_000):   # Usually small images
+            is_fssai_cert = True
             score += 40
             reasons.append(
-                f"TEXT LABEL: high edges ({edge_mean:.0f}) + limited colours "
-                f"({unique_colours}) — back/declaration label"
+                f"REGULATORY CERT: high white bg ({bg_light_frac*100:.0f}%), "
+                f"low text density ({text_density*100:.0f}%) — FSSAI/cert image (+40)"
             )
-        # High edge + high colour = text on colourful packaging (front or back)
-        elif edge_mean > 20 and unique_colours >= 1800:
-            score += 18
+
+        # ── Back label / declaration panel detector ───────────────────────────
+        # Back labels: high edge density + mostly white/light bg + medium text density
+        # This is stronger evidence than just "high edges" because it filters out
+        # colourful front packaging with graphics that also have high edges.
+        is_text_label = False
+        if (not is_barcode and not is_fssai_cert
+                and edge_mean > 18 and bg_light_frac > 0.35 and text_density > 0.08):
+            is_text_label = True
+            score += 45
             reasons.append(
-                f"Colourful text-rich: edges ({edge_mean:.0f}), colours ({unique_colours})"
+                f"BACK/DECLARATION LABEL: edges={edge_mean:.0f}, "
+                f"light-bg={bg_light_frac*100:.0f}%, text-density={text_density*100:.0f}% (+45)"
             )
-        # Low edge + high colour = lifestyle photo / marketing image (KEY PENALIZE)
-        elif edge_mean < 12 and unique_colours > 2000:
-            score -= 30
-            reasons.append(
-                f"LIFESTYLE/PHOTO: low edges ({edge_mean:.0f}) + high colour "
-                f"diversity ({unique_colours}) — penalized"
-            )
-        # Low edge + low colour = flat graphic / icon
-        elif edge_mean < 12 and unique_colours < 500:
-            score -= 25
-            reasons.append(
-                f"FLAT GRAPHIC: edges ({edge_mean:.0f}), colours ({unique_colours})"
-            )
-        else:
-            score += 5
-            reasons.append(
-                f"Medium visual complexity (edges={edge_mean:.0f}, colours={unique_colours})"
-            )
+
+        # ── Combined classifier: KEY FIX ──────────────────────────────────────
+        if not is_barcode and not is_fssai_cert and not is_text_label:
+            # ── Colored-background compliance label ─────────────────────────
+            # Cadbury purple, green Amul, red Maggi etc. — compliance text printed
+            # in WHITE on a COLORED (non-white) background.
+            # In grayscale: the colored background is DARK (gray 50-130), so
+            # text_density is very HIGH.  bg_light_frac is LOW (only white text).
+            # These images look like "lifestyle" to the old detector → wrongly penalized.
+            # Key signature: high text_density + at least some light pixels (the text)
+            #   + some edge activity from the text characters.
+            is_colored_label = False
+            if (text_density > 0.40            # colored bg = lots of "dark" pixels
+                    and bg_light_frac > 0.01   # at least 1% white/light (text area)
+                    and edge_mean > 6          # some edges = text present
+                    and 0.4 <= ratio <= 2.5):  # reasonable packaging aspect ratio
+                is_colored_label = True
+                score += 35
+                reasons.append(
+                    f"COLORED-BG COMPLIANCE LABEL: dark-bg={text_density*100:.0f}%, "
+                    f"light-text={bg_light_frac*100:.1f}%, edges={edge_mean:.0f} (+35)"
+                )
+
+            if not is_colored_label:
+                # High edge + low-medium colour = TEXT LABEL (back/declaration/nutrition)
+                if edge_mean > 20 and unique_colours < 1800:
+                    score += 40
+                    reasons.append(
+                        f"TEXT LABEL: high edges ({edge_mean:.0f}) + limited colours "
+                        f"({unique_colours}) — back/declaration label"
+                    )
+                # High edge + high colour = text on colourful packaging (front or back)
+                elif edge_mean > 20 and unique_colours >= 1800:
+                    score += 18
+                    reasons.append(
+                        f"Colourful text-rich: edges ({edge_mean:.0f}), colours ({unique_colours})"
+                    )
+                # Low edge + high colour = lifestyle photo / marketing image (KEY PENALIZE)
+                elif edge_mean < 12 and unique_colours > 2000:
+                    score -= 30
+                    reasons.append(
+                        f"LIFESTYLE/PHOTO: low edges ({edge_mean:.0f}) + high colour "
+                        f"diversity ({unique_colours}) — penalized"
+                    )
+                # Low edge + low colour = flat graphic / icon
+                elif edge_mean < 12 and unique_colours < 500:
+                    score -= 25
+                    reasons.append(
+                        f"FLAT GRAPHIC: edges ({edge_mean:.0f}), colours ({unique_colours})"
+                    )
+                else:
+                    score += 5
+                    reasons.append(
+                        f"Medium visual complexity (edges={edge_mean:.0f}, colours={unique_colours})"
+                    )
 
         # ── Pixel variance: only penalize truly uniform images ────────────────
         stat = ImageStat.Stat(img)
@@ -541,7 +628,7 @@ def _visual_score_sync(image_bytes: bytes) -> tuple[int, str, str]:
         # edge peaks — one per product.  These contain ZERO compliance information.
         # Detection: sample 8 vertical strips; count those with high edge density.
         # If most vertical strips have high edges = multiple distinct objects = range shot.
-        if ratio > 1.2 and w >= 200:
+        if ratio > 1.2 and w >= 200 and not is_barcode:
             strip_w = max(1, w // 8)
             high_edge_strips = 0
             for s in range(8):
@@ -598,13 +685,17 @@ async def _download_and_score_visual(session: "httpx.AsyncClient", url: str) -> 
 # Compliance field weights — used to calculate "marginal gain" of each image
 # (how many NEW legal fields would this image contribute to the selected set?)
 _FIELD_WEIGHTS = {
-    "has_fssai": 80,
-    "has_mrp": 35,
-    "has_manufacturer": 35,
-    "has_net_qty": 30,
-    "has_consumer_care": 20,
-    "has_date_batch": 20,
-    "has_country": 15,
+    "has_fssai_with_number": 120,  # FSSAI + 14-digit licence number — absolute top priority
+    "has_fssai":              80,   # FSSAI text present — regulatory licence
+    "has_dense_text":         60,   # 40+ OCR words — back label / ingredient panel
+    "has_mrp":                35,   # Mandatory declaration
+    "has_manufacturer":       35,   # Mandatory declaration
+    "has_net_qty":            30,   # Mandatory declaration
+    "has_ingredients":        30,   # Ingredient list (Food items — back/side label)
+    "has_consumer_care":      20,   # Consumer care details
+    "has_date_batch":         20,   # Mfg/Expiry/Batch dates
+    "has_country":            15,   # Country of origin
+    "has_nutrition_only":     10,   # Nutrition facts table (lower than ingredients)
 }
 
 
@@ -671,32 +762,64 @@ def _coverage_optimized_select(
     if not candidates:
         return []
 
-    # --- Step 2: Find FSSAI-containing images (must-include) ---
-    fssai_images = [img for img in candidates if img.get("ocr_signals", {}).get("has_fssai")]
+    # ── Step 2: Priority pre-selection ───────────────────────────────────────
+    # RANK 1: Image with FSSAI + 14-digit licence number (highest value possible)
+    # RANK 2: Dense-text image (back label / ingredient panel, 40+ OCR words)
+    # RANK 3: Front-of-product image (only ONE ever selected)
+    # These are force-inserted as the first slots before the greedy loop starts.
+
+    fssai_number_images = [
+        img for img in candidates
+        if img.get("ocr_signals", {}).get("has_fssai_with_number")
+    ]
+    fssai_images = [
+        img for img in candidates
+        if img.get("ocr_signals", {}).get("has_fssai") and img not in fssai_number_images
+    ]
+    dense_text_images = [
+        img for img in candidates
+        if img.get("ocr_signals", {}).get("has_dense_text") and img not in fssai_number_images
+    ]
 
     # --- Step 3: Greedy set-cover selection ---
     selected: list[dict] = []
-    suppressed: set[int] = set()  # indexes into `candidates`
+    suppressed: set[int] = set()   # indexes into `candidates`
     covered_fields: set[str] = set()
-    front_pkg_count = 0
+    front_pkg_count = 0            # max 1 front_package ever selected
 
-    # If we have FSSAI images, start with the best one
-    if fssai_images:
-        best_fssai = max(fssai_images, key=lambda x: x.get("compliance_score", 0))
-        selected.append(best_fssai)
-        # Update covered fields
+    def _commit(img: dict) -> None:
+        """Add img to selected set, mark its fields as covered, suppress near-dupes."""
+        nonlocal front_pkg_count
+        selected.append(img)
         for field in _FIELD_WEIGHTS:
-            if best_fssai.get("ocr_signals", {}).get(field):
+            if img.get("ocr_signals", {}).get(field):
                 covered_fields.add(field)
-        # Suppress near-duplicates of this image
-        for j, c in enumerate(candidates):
-            if c is not best_fssai and _is_near_duplicate(best_fssai, c):
-                suppressed.add(j)
-        # Track front_package count
-        if best_fssai.get("classification", {}).get("category") == "front_package":
+        if img.get("classification", {}).get("category") == "front_package":
             front_pkg_count += 1
+        idx = candidates.index(img)
+        for j, c in enumerate(candidates):
+            if j != idx and _is_near_duplicate(img, c):
+                c.setdefault("skip_reason", "Near-duplicate of selected image")
+                suppressed.add(j)
 
-    # Fill remaining slots greedily
+    # RANK 1 slot — best FSSAI+licence-number image
+    if fssai_number_images and len(selected) < max_for_ocr:
+        best = max(fssai_number_images, key=lambda x: x.get("compliance_score", 0))
+        _commit(best)
+
+    # Also include best plain-FSSAI image if not already covered
+    if fssai_images and len(selected) < max_for_ocr:
+        best_fssai = max(fssai_images, key=lambda x: x.get("compliance_score", 0))
+        if best_fssai not in selected:
+            _commit(best_fssai)
+
+    # RANK 2 slot — best dense-text image (if not already selected)
+    if dense_text_images and len(selected) < max_for_ocr:
+        best_dense = max(dense_text_images, key=lambda x: x.get("compliance_score", 0))
+        if best_dense not in selected:
+            _commit(best_dense)
+
+    # Fill remaining slots greedily (coverage-optimized)
     for _ in range(max_for_ocr - len(selected)):
         best_img = None
         best_effective_score = -9999
@@ -705,50 +828,30 @@ def _coverage_optimized_select(
             if j in suppressed or img in selected:
                 continue
 
-            # Category cap: max 1 front_package
             cat = img.get("classification", {}).get("category", "unknown")
-            if cat == "front_package" and front_pkg_count >= 1:
-                # Only allow if no back/side/nutrition candidate exists at all
-                has_better = any(
-                    c.get("classification", {}).get("category") in ("back_package", "side_label", "nutrition")
-                    for k, c in enumerate(candidates)
-                    if k not in suppressed and c not in selected
-                )
-                if has_better:
-                    continue
 
-            # Effective score = base compliance score + marginal coverage gain
-            base = img.get("compliance_score", 0)
-            gain = _marginal_gain(img, covered_fields)
-            # Bonus for having compliance signals (images with OCR-confirmed signals
-            # are always better than those we only have URL heuristics for)
-            ocr_bonus = 25 if img.get("ocr_signals") else 0
-            effective = base + gain + ocr_bonus
+            # FRONT PACKAGE CAP: once a front image is selected, never pick another.
+            # Even if no other type exists — we'd rather select unknown than a 2nd front.
+            if cat == "front_package" and front_pkg_count >= 1:
+                img.setdefault("skip_reason", "Front-package already selected (cap=1)")
+                continue
+
+            # Effective score = base + marginal coverage gain + OCR-confirmed bonus
+            base  = img.get("compliance_score", 0)
+            gain  = _marginal_gain(img, covered_fields)
+            # Extra bonus for dense-text (many OCR words = rich info content)
+            text_bonus = 30 if img.get("ocr_signals", {}).get("has_dense_text") else 0
+            ocr_bonus  = 20 if img.get("ocr_signals") else 0
+            effective  = base + gain + text_bonus + ocr_bonus
 
             if effective > best_effective_score:
                 best_effective_score = effective
                 best_img = img
 
         if best_img is None:
-            break  # no more useful candidates
+            break
 
-        selected.append(best_img)
-
-        # Update covered fields from this pick
-        for field in _FIELD_WEIGHTS:
-            if best_img.get("ocr_signals", {}).get(field):
-                covered_fields.add(field)
-
-        # Track front_package
-        if best_img.get("classification", {}).get("category") == "front_package":
-            front_pkg_count += 1
-
-        # Suppress near-duplicates of the image we just picked
-        idx = candidates.index(best_img)
-        for j, c in enumerate(candidates):
-            if j != idx and _is_near_duplicate(best_img, c):
-                c.setdefault("skip_reason", f"Near-duplicate of selected image")
-                suppressed.add(j)
+        _commit(best_img)
 
     return selected
 
@@ -872,21 +975,45 @@ def _ocr_thumbnail_sync(image_bytes: bytes) -> str:
     Run fast EasyOCR on a thumbnail image.
     Preserves line structure (groups by Y-band) so compliance patterns work.
     Returns extracted text or empty string.
+
+    Size: up to 800px — larger than before so small text strips (e.g. the
+    compliance line at the bottom of a Cadbury pack) are readable at thumbnail size.
+    Contrast boost: colored backgrounds (purple, green, red) are enhanced so
+    white text stands out for OCR.
     """
     try:
         import numpy as np
-        from PIL import Image
+        from PIL import Image, ImageEnhance, ImageOps
         from ocr.service import _get_reader
 
         img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        # Resize to reasonable OCR size — big enough to read compliance text
         w, h = img.size
-        long_side = max(w, h)
-        if long_side > 500:
-            scale = 500 / long_side
-            img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
-        img_array = __import__("numpy").array(img)
 
+        # Resize: use 800px for OCR — larger thumbnail = readable small text
+        long_side = max(w, h)
+        if long_side > 800:
+            scale = 800 / long_side
+            img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+        elif long_side < 200:
+            # Very small image — upscale for OCR
+            scale = 200 / long_side
+            img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+
+        # ── Contrast enhancement for colored backgrounds ──────────────────────
+        # Images with dark colored backgrounds (purple Cadbury, green Amul, etc.)
+        # have low average grayscale → white compliance text needs boosting.
+        gray_arr = np.array(img.convert("L"))
+        mean_gray = float(gray_arr.mean())
+
+        if mean_gray < 100:
+            # Colored/dark background — boost contrast to make white text clearer
+            enhancer = ImageEnhance.Contrast(img)
+            img = enhancer.enhance(2.5)
+            # Also slightly sharpen to improve OCR on small text
+            enhancer2 = ImageEnhance.Sharpness(img)
+            img = enhancer2.enhance(2.0)
+
+        img_array = np.array(img)
         reader = _get_reader()
         results = reader.readtext(img_array, detail=1)
         if not results:
@@ -929,14 +1056,67 @@ def _score_ocr_signals(text: str) -> tuple[int, str, dict]:
         "has_consumer_care":  bool(_CONSUMER_CARE_OCR_SIGNAL.search(text)),
         "has_date_batch":     bool(_DATE_BATCH_OCR_SIGNAL.search(text)),
         "has_country":        bool(_COUNTRY_OCR_SIGNAL.search(text)),
-        "has_ingredients":    has_ingredients_raw,        # NEW
-        "has_nutrition_only": has_nutrition_only,         # NEW — pure nutrition table (not ingredients)
+        "has_ingredients":    has_ingredients_raw,        # ingredient list heading detected
+        "has_nutrition_only": has_nutrition_only,         # pure nutrition table (not ingredients)
         "is_marketing_only":  False,
     }
 
+    # ── Text density signal ───────────────────────────────────────────────────
+    word_count = len(text.split())
+    has_dense_text = word_count >= 40
+    signals["has_dense_text"] = has_dense_text
+    signals["word_count"] = word_count
+
+    # ── FSSAI + licence number combo ─────────────────────────────────────────
+    # A 14-digit number near FSSAI/LIC.NO text = actual FSSAI licence number.
+    # This is the most critical compliance datapoint → absolute highest priority.
+    #
+    # OCR quirks handled:
+    #   • OCR reads "10014022002711" as "1001 4022 0027 11" (spaces between groups)
+    #   • OCR reads "LIC. NO." as "LIC NO" or "LIC.NO." or "L1C. NO."
+    #   • FSSAI logo may be unreadable cursive but LIC.NO is always printed clearly
+    #
+    # Strategy: check both strict (no spaces) AND relaxed (spaces/hyphens OK).
+    #   Also: if LIC.NO is present even without the word FSSAI → set has_fssai=True.
+
+    # Strict: 14 contiguous digits starting with non-zero
+    _FSSAI_STRICT_RE  = re.compile(r"[1-9]\d{13}")
+    # Relaxed: 14 digits with optional spaces/hyphens (OCR spacing artefacts)
+    _FSSAI_SPACED_RE  = re.compile(
+        r"[1-9]"                            # first digit (non-zero)
+        r"(?:\d[\s\-]?){3}"                 # digits 2-4 (with optional gap)
+        r"(?:\d[\s\-]?){4}"                 # digits 5-8
+        r"(?:\d[\s\-]?){4}"                 # digits 9-12
+        r"\d\d"                             # digits 13-14
+    )
+    # LIC.NO detector (even without word FSSAI in text)
+    _LIC_NO_RE = re.compile(
+        r"L\.?I\.?C\.?\s*N[O0]\.?|"
+        r"LIC(?:ENCE|ENSE)?\s*N[O0]\.?|"
+        r"LICENCE\s*N[O0]|LICENSE\s*N[O0]",
+        re.IGNORECASE,
+    )
+
+    has_lic_no     = bool(_LIC_NO_RE.search(text))
+    has_strict_num = bool(_FSSAI_STRICT_RE.search(text))
+    has_spaced_num = bool(_FSSAI_SPACED_RE.search(text))
+    has_any_num    = has_strict_num or has_spaced_num
+
+    # If LIC.NO is present, treat as FSSAI even if the word FSSAI wasn't OCR'd
+    if has_lic_no:
+        signals["has_fssai"] = True
+
+    has_fssai_with_number = signals["has_fssai"] and has_any_num
+    # Also: LIC.NO + number alone is definitive (no need for the word FSSAI)
+    if has_lic_no and has_any_num:
+        has_fssai_with_number = True
+
+    signals["has_fssai_with_number"] = has_fssai_with_number
+
     compliance_count = sum(
         1 for k, v in signals.items()
-        if k not in ("is_marketing_only", "has_nutrition_only") and v
+        if k not in ("is_marketing_only", "has_nutrition_only", "has_dense_text",
+                     "word_count", "has_fssai_with_number") and v
     )
 
     # Mark as marketing-only if marketing patterns appear but zero compliance signals
@@ -946,9 +1126,27 @@ def _score_ocr_signals(text: str) -> tuple[int, str, dict]:
     boost = 0
     parts: list[str] = []
 
-    if signals["has_fssai"]:
+    # ── PRIORITY 1: FSSAI licence number visible ──────────────────────────────
+    # Image shows "FSSAI Lic. No. 12345678901234" → absolute must-include.
+    # Extra +70 on top of base FSSAI +80 = total +150 for FSSAI+number image.
+    if has_fssai_with_number:
+        boost += 150
+        parts.append("FSSAI LICENCE NUMBER visible (+150) — HIGHEST PRIORITY")
+    elif signals["has_fssai"]:
         boost += 80
-        parts.append("FSSAI detected in thumbnail OCR (+80)")
+        parts.append("FSSAI text detected (+80)")
+
+    # ── PRIORITY 2: Dense text = back label / ingredient panel ───────────────
+    # Images with 40+ OCR words are almost always back labels or ingredient lists.
+    # These are more valuable than a front-of-pack image.
+    if has_dense_text:
+        boost += 60
+        parts.append(f"DENSE TEXT: {word_count} words detected — back label/ingredient panel (+60)")
+    elif word_count >= 20:
+        boost += 25
+        parts.append(f"MODERATE TEXT: {word_count} words detected (+25)")
+
+    # Individual compliance signals
     if signals["has_mrp"]:
         boost += 35
         parts.append("MRP detected (+35)")
@@ -960,7 +1158,7 @@ def _score_ocr_signals(text: str) -> tuple[int, str, dict]:
         parts.append("Net quantity text (+30)")
     if signals["has_ingredients"]:
         boost += 45
-        parts.append("Ingredient heading detected (+45)")        # NEW
+        parts.append("Ingredient heading detected (+45)")
     if signals["has_consumer_care"]:
         boost += 20
         parts.append("Consumer care info (+20)")
@@ -1201,11 +1399,34 @@ async def score_and_select_images(
         img["score_reason"] = "; ".join(reasons) if reasons else "General product image"
 
     # ── Stage 3: Coverage-optimized selection ─────────────────────────────────
-    # Greedy algorithm that maximises compliance field coverage, guarantees
-    # FSSAI-containing images are always included, and limits front_package to 1.
-    selected = _coverage_optimized_select(images, max_for_ocr)
+    # DEDUP FIRST: strip any images with duplicate URLs before selection.
+    # This prevents the same image appearing twice (e.g. same URL from two
+    # different collectors: colorImages_js and altImages_dom).
+    seen_before_select: set[str] = set()
+    deduped_images: list[dict] = []
+    for img in images:
+        url_key = img.get("url", "").split("?")[0]  # ignore query params
+        if url_key and url_key not in seen_before_select:
+            seen_before_select.add(url_key)
+            deduped_images.append(img)
 
-    return selected
+    # Greedy algorithm: maximises compliance coverage, FSSAI-first, front_package capped at 1
+    selected = _coverage_optimized_select(deduped_images, max_for_ocr)
+
+    # ── Guarantee exactly max_for_ocr images (if enough exist) ──────────────
+    # If the greedy algorithm returned fewer images than requested (can happen
+    # when many near-duplicates exist), fill remaining slots from the deduped
+    # pool in score order.
+    if len(selected) < max_for_ocr:
+        selected_urls = {img.get("url", "") for img in selected}
+        for img in deduped_images:
+            if len(selected) >= max_for_ocr:
+                break
+            if img.get("url", "") not in selected_urls and img.get("compliance_score", 0) > -30:
+                selected_urls.add(img["url"])
+                selected.append(img)
+
+    return selected[:max_for_ocr]  # hard cap — never return more than requested
 
 
 def select_packaging_images(images: list[dict], max_for_ocr: int = 4) -> list[dict]:

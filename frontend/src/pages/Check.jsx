@@ -293,6 +293,218 @@ function Lightbox({ url, onClose }) {
   );
 }
 
+// ── Manual Image Picker ───────────────────────────────────────────────────────
+function ManualImagePicker({ scanId, onTextReady, onClose }) {
+  const [allImages, setAllImages]       = useState([]);
+  const [selected, setSelected]         = useState(new Set());
+  const [loadingImages, setLoadingImages] = useState(true);
+  const [running, setRunning]           = useState(false);
+  const [result, setResult]             = useState(null);
+  const [err, setErr]                   = useState("");
+
+  // Fetch all images from backend
+  useEffect(() => {
+    if (!scanId) return;
+    api.get(`/api/url-scan/${scanId}/all-images`)
+      .then(({ data }) => {
+        setAllImages(data.images || []);
+        // Pre-select auto-selected images
+        const autoSelected = new Set(
+          (data.images || []).filter(i => i.auto_selected).map(i => i.url)
+        );
+        setSelected(autoSelected);
+      })
+      .catch(() => setErr("Could not load images. Please try again."))
+      .finally(() => setLoadingImages(false));
+  }, [scanId]);
+
+  const toggle = (url) => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(url)) next.delete(url);
+      else if (next.size < 8) next.add(url);
+      return next;
+    });
+  };
+
+  const handleRunOcr = async () => {
+    if (selected.size === 0) return;
+    setRunning(true); setErr(""); setResult(null);
+    try {
+      const { data } = await api.post(`/api/url-scan/${scanId}/manual-ocr`, {
+        image_urls: [...selected],
+      });
+      setResult(data);
+    } catch (e) {
+      setErr(e.response?.data?.detail || "OCR failed. Please try again.");
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-ink-navy/80 backdrop-blur-sm overflow-y-auto py-8 px-4">
+      <div className="w-full max-w-4xl bg-ledger border border-border-main shadow-2xl flex flex-col">
+
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-3 border-b border-border-main bg-card-bg">
+          <div>
+            <p className="mono-label text-muted-fg text-xs">MANUAL IMAGE SELECTOR — DEBUG MODE</p>
+            <p className="text-xs text-muted-fg mt-0.5">
+              Select up to 8 images for OCR · Auto-selected images are pre-checked
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="mono-label text-xs text-ink-navy hover:text-[#C41E3A] border border-border-main px-3 py-1.5 hover:border-[#C41E3A]/40 transition-colors"
+          >
+            ✕ CLOSE
+          </button>
+        </div>
+
+        {/* Loading state */}
+        {loadingImages && (
+          <div className="p-10 text-center">
+            <p className="text-sm font-mono text-muted-fg animate-pulse">⟳ Loading all product images…</p>
+          </div>
+        )}
+
+        {/* Image grid */}
+        {!loadingImages && allImages.length > 0 && (
+          <div className="p-4">
+            {/* Legend */}
+            <div className="flex flex-wrap gap-3 mb-3 text-[10px] font-mono text-muted-fg">
+              <span className="flex items-center gap-1">
+                <span className="w-3 h-3 border-2 border-[#16a34a] bg-[#16a34a]/10 inline-block rounded-sm"/> Auto-selected by algorithm
+              </span>
+              <span className="flex items-center gap-1">
+                <span className="w-3 h-3 border-2 border-ink-navy bg-ink-navy/10 inline-block rounded-sm"/> Manually selected
+              </span>
+              <span className="flex items-center gap-1">
+                <span className="w-3 h-3 border border-border-main inline-block rounded-sm"/> Not selected
+              </span>
+              <span className="ml-auto">{selected.size}/8 selected</span>
+            </div>
+
+            <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-2">
+              {allImages.map((img, idx) => {
+                const isSelected    = selected.has(img.url);
+                const isAutoSelected = img.auto_selected;
+                const isDisabled    = !isSelected && selected.size >= 8;
+
+                return (
+                  <div
+                    key={img.url + idx}
+                    onClick={() => !isDisabled && toggle(img.url)}
+                    className={`relative flex flex-col cursor-pointer border-2 transition-all duration-150 rounded-sm overflow-hidden
+                      ${isSelected && isAutoSelected ? "border-[#16a34a] ring-1 ring-[#16a34a]/30" : ""}
+                      ${isSelected && !isAutoSelected ? "border-ink-navy ring-1 ring-ink-navy/30" : ""}
+                      ${!isSelected && !isDisabled ? "border-border-main hover:border-ink-navy/40" : ""}
+                      ${isDisabled ? "border-border-main opacity-40 cursor-not-allowed" : ""}
+                    `}
+                  >
+                    {/* Checkbox overlay */}
+                    <div className={`absolute top-1 left-1 z-10 w-4 h-4 rounded-sm border flex items-center justify-center text-[9px]
+                      ${isSelected
+                        ? "bg-ink-navy border-ink-navy text-white"
+                        : "bg-white/80 border-border-main"}`}
+                    >
+                      {isSelected && "✓"}
+                    </div>
+
+                    {/* Auto-selected badge */}
+                    {isAutoSelected && (
+                      <div className="absolute top-1 right-1 z-10 bg-[#16a34a] text-white text-[8px] font-mono px-1 py-0.5 rounded-sm leading-none">
+                        AUTO
+                      </div>
+                    )}
+
+                    {/* Image */}
+                    <div className="bg-[#f5f2ec] flex items-center justify-center" style={{ aspectRatio: "1/1" }}>
+                      <img
+                        src={img.url}
+                        alt={img.alt || `Image ${idx + 1}`}
+                        className="w-full h-full object-contain"
+                        loading="lazy"
+                        onError={(e) => { e.target.style.display = "none"; e.target.parentNode.innerHTML = '<p class="text-[10px] text-muted-fg font-mono p-2 text-center">UNAVAILABLE</p>'; }}
+                      />
+                    </div>
+
+                    {/* Footer */}
+                    <div className="px-1.5 py-1 bg-card-bg border-t border-border-main">
+                      <div className="flex items-center justify-between">
+                        <p className="text-[8px] font-mono text-muted-fg truncate flex-1">
+                          #{idx + 1} {img.source || "html"}
+                        </p>
+                        {img.score > 0 && (
+                          <span className="text-[8px] font-mono text-ink-navy ml-1">+{img.score}</span>
+                        )}
+                      </div>
+                      {img.alt && (
+                        <p className="text-[8px] font-mono text-muted-fg truncate leading-tight" title={img.alt}>
+                          {img.alt.slice(0, 30)}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {!loadingImages && allImages.length === 0 && (
+          <div className="p-8 text-center">
+            <p className="text-sm font-mono text-muted-fg">No images found for this scan.</p>
+          </div>
+        )}
+
+        {/* Error */}
+        {err && (
+          <div className="mx-4 mb-3 border border-[#C41E3A]/30 bg-[#C41E3A]/5 px-3 py-2 text-xs text-[#C41E3A] font-mono">
+            {err}
+          </div>
+        )}
+
+        {/* OCR Result preview */}
+        {result && (
+          <div className="mx-4 mb-3 border border-[#16a34a]/30 bg-[#16a34a]/5 px-4 py-3">
+            <div className="flex items-center justify-between mb-2">
+              <p className="mono-label text-[#16a34a] text-xs">
+                ✓ OCR COMPLETE — {result.images_processed} images, {result.ocr_char_count} chars
+              </p>
+              <button
+                onClick={() => { onTextReady(result.formatted_text, result.product_name); onClose(); }}
+                className="mono-label text-xs bg-ink-navy text-white px-3 py-1.5 hover:bg-opacity-90"
+              >
+                USE THIS TEXT →
+              </button>
+            </div>
+            <pre className="text-[10px] font-mono text-ink-navy bg-ledger border border-border-main p-3 max-h-40 overflow-y-auto whitespace-pre-wrap">
+              {result.formatted_text}
+            </pre>
+          </div>
+        )}
+
+        {/* Footer actions */}
+        <div className="flex items-center justify-between gap-3 px-5 py-3 border-t border-border-main bg-card-bg">
+          <p className="text-[10px] font-mono text-muted-fg">
+            Select images that show the back label, ingredient list, FSSAI number, MRP, and manufacturer.
+          </p>
+          <button
+            onClick={handleRunOcr}
+            disabled={selected.size === 0 || running}
+            className="bg-ink-navy text-ink-light px-5 py-2 text-xs font-medium mono-label disabled:opacity-50 disabled:cursor-not-allowed hover:bg-opacity-90 whitespace-nowrap"
+          >
+            {running ? "⟳ Running OCR…" : `▶ Run OCR on ${selected.size} Image${selected.size !== 1 ? "s" : ""}`}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 export default function Check() {
   const navigate = useNavigate();
 
@@ -317,6 +529,9 @@ export default function Check() {
   const [fetchBtnLabel, setFetchBtnLabel] = useState("Fetch");
   const [ocrSelectedImages, setOcrSelectedImages] = useState([]); // ← single source of truth
   const [lightboxImage, setLightboxImage] = useState(null);       // ← enlarged preview
+  // Raw combined text (webpage + OCR) used for compliance checks — separate from
+  // formatted_text which is displayed in the text tab for human review.
+  const [complianceText, setComplianceText] = useState("");
   const pollRef = useRef(null);
 
   // Clear poll on unmount
@@ -377,14 +592,20 @@ export default function Check() {
           const res = await api.get(`/api/url-scan/${id}/result`);
           const result = res.data;
 
+          // Display formatted_text in the text tab (structured, readable)
           setText(result.formatted_text);
+          // Store raw combined text separately — used for compliance scan
+          // (compliance engine needs raw text, not the "Not Detected" labels)
+          if (result.compliance_text) {
+            setComplianceText(result.compliance_text);
+          }
 
           // ── Auto-fill metadata fields ─────────────────────────────────
           if (result.product_name) setProductName(result.product_name);
           if (result.category)     setCategory(result.category);
           if (result.platform)     setPlatform(result.platform);
 
-          setTab("text");
+          // Stay on URL tab so user can see selected images and review
           setFetchBtnLabel("Fetch Again");
           setStatus("✓ Product data extracted — review the information below, then Run Compliance Scan.");
           setLoading(false);
@@ -433,6 +654,7 @@ export default function Check() {
     setScanPlatform("Detecting...");
     setOcrSelectedImages([]);   // clear previous scan's images
     setLightboxImage(null);
+    setComplianceText("");      // clear previous scan's compliance text
     setLoading(true);
     setFetchBtnLabel("⟳ Fetching...");
 
@@ -471,7 +693,9 @@ export default function Check() {
 
   // ── Existing scan handler (unchanged) ─────────────────────────────────────
   const handleScan = async () => {
-    const finalText = text.trim();
+    // Use compliance_text (raw OCR + webpage combined) if it came from a URL scan.
+    // Fall back to the text textarea for manual text entry (Paste Text / OCR Image tabs).
+    const finalText = (complianceText || text).trim();
     if (finalText.length < 10) {
       setError("Please provide at least 10 characters of product label text.");
       return;
@@ -651,6 +875,7 @@ export default function Check() {
                   onOpenLightbox={setLightboxImage}
                 />
 
+
                 {/* Extracted text notice (only after fetch completes) */}
                 {text && scanStatus === "done" && (
                   <div className="border border-[#16a34a]/30 bg-[#16a34a]/5 px-4 py-3 text-xs text-[#16a34a]">
@@ -745,6 +970,7 @@ export default function Check() {
       {lightboxImage && (
         <Lightbox url={lightboxImage} onClose={() => setLightboxImage(null)} />
       )}
+
     </div>
   );
 }

@@ -94,10 +94,10 @@
       "legal_ref": "Rule 6(1)(g) + LM(PC)R-2017 Amdt.",
       "severity": "high",
       "patterns": [
-        "(?:country\\s*of\\s*origin|made\\s*in|product\\s*of|origin|manufactured\\s*in)[:\\s]+([A-Za-z\\s]{3,40})",
-        "Country of Origin[:\\s]+([A-Za-z\\s]{2,30})",
-        "\\bMade\\s+in\\s+([A-Za-z\\s]{3,30})\\b",
-        "(?:origin|Origin)[:\\s]+([A-Za-z]{3,30})"
+        "(?:country\\s*of\\s*origin|made\\s*in|product\\s*of|manufactured\\s*in)[:\\s]+([A-Za-z][A-Za-z ]{2,30}?)(?:\\n|$|\\s{2,}|[,;|])",
+        "Country of Origin[:\\s]+([A-Za-z][A-Za-z ]{2,25}?)(?:\\n|$|\\s{2,})",
+        "\\bMade\\s+in\\s+([A-Za-z][A-Za-z ]{2,25}?)\\b(?:\\n|$|[.,;|])",
+        "(?:origin|Origin)[:\\s]+([A-Za-z]{3,25})(?:\\n|$)"
       ],
       "description": "Country of origin (mandatory post-2017 amendment)."
     },

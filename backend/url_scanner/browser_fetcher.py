@@ -128,44 +128,97 @@ def _extract_images_from_state(page_content: str, base_url: str) -> list[dict]:
     return found
 
 
-async def fetch_rendered_page(url: str, timeout_s: float = 30.0) -> dict:
+async def fetch_rendered_page(url: str, timeout_s: float = 60.0) -> dict:
     """
-    Launch headless Chromium, navigate to `url`, wait for product gallery
-    to render, then extract all product image URLs from the live DOM.
+    Launch headless Chromium and extract product images from the rendered page.
+
+    Runs Playwright in a **dedicated thread with its own event loop** so it is
+    fully isolated from FastAPI/uvicorn's event loop.  This is the only reliable
+    way to use Playwright inside a long-running FastAPI process — sharing the
+    same event loop causes silent failures on the 2nd+ call.
 
     Returns:
-        {
-          "html": str,           # full rendered HTML
-          "images": list[dict],  # [{url, alt, score, source}, ...]
-          "strategy": "browser"
-        }
+        { "html": str, "images": list[dict], "strategy": "browser", "final_url": str }
+    """
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _sync_playwright_fetch, url, timeout_s)
 
-    Raises ValueError if Playwright is not installed.
-    Raises TimeoutError if the page doesn't load within timeout_s.
+
+def _sync_playwright_fetch(url: str, timeout_s: float) -> dict:
+    """
+    Runs the Playwright coroutine in a brand-new event loop inside a thread.
+    Called via run_in_executor — never call directly from async code.
+    """
+    import asyncio as _asyncio
+    new_loop = _asyncio.new_event_loop()
+    _asyncio.set_event_loop(new_loop)
+    try:
+        return new_loop.run_until_complete(_playwright_core(url, timeout_s))
+    finally:
+        try:
+            new_loop.close()
+        except Exception:
+            pass
+
+
+async def _playwright_core(url: str, timeout_s: float) -> dict:
+    """
+    Actual Playwright logic — runs inside a fresh dedicated event loop.
+    Extracts product images from a fully-rendered page.
     """
     try:
         from playwright.async_api import async_playwright, TimeoutError as PWTimeout
     except ImportError:
         raise ValueError(
-            "Playwright is not installed. Run: pip install playwright && "
+            "Playwright not installed. Run: pip install playwright && "
             "python -m playwright install chromium"
         )
 
+    import random as _rnd
+
     images: list[dict] = []
     seen_urls: set[str] = set()
+    final_url = url
+    rendered_html = ""
 
-    def _add(url: str, alt: str = "", source: str = "browser_dom") -> None:
-        url = _normalize_img_url(url, base_url=final_url)
-        if url and url not in seen_urls and _is_useful_image(url):
-            seen_urls.add(url)
+    # ── Randomize fingerprint so Amazon sees a different user each request ────
+    _chrome_ver = _rnd.choice(["122", "123", "124", "125", "126"])
+    _win_ver    = _rnd.choice(["10.0", "11.0"])
+    _vp_w       = _rnd.randint(1260, 1400)
+    _vp_h       = _rnd.randint(860, 960)
+    _hw_conc    = _rnd.choice([4, 6, 8, 12])
+
+    is_amazon = "amazon." in url.lower()
+
+    if is_amazon:
+        ctx_ua = (
+            f"Mozilla/5.0 (Windows NT {_win_ver}; Win64; x64) AppleWebKit/537.36 "
+            f"(KHTML, like Gecko) Chrome/{_chrome_ver}.0.0.0 Safari/537.36"
+        )
+        ctx_viewport = {"width": _vp_w, "height": _vp_h}
+        # Strip tracking params — just /dp/ASIN
+        _asin_m = re.search(r"/dp/([A-Z0-9]{10})", url)
+        if _asin_m:
+            _domain = "www.amazon.in" if "amazon.in" in url else "www.amazon.com"
+            url = f"https://{_domain}/dp/{_asin_m.group(1)}?th=1&psc=1"
+    else:
+        _android_ver = _rnd.choice(["10", "11", "12", "13"])
+        ctx_ua = (
+            f"Mozilla/5.0 (Linux; Android {_android_ver}; SM-G981B) AppleWebKit/537.36 "
+            f"(KHTML, like Gecko) Chrome/{_chrome_ver}.0.6367.82 Mobile Safari/537.36"
+        )
+        ctx_viewport = {"width": 390, "height": _rnd.randint(820, 900)}
+
+    def _add(img_url: str, alt: str = "", source: str = "browser_dom") -> None:
+        img_url = _normalize_img_url(img_url, base_url=final_url)
+        if img_url and img_url not in seen_urls and _is_useful_image(img_url):
+            seen_urls.add(img_url)
             score = 15
-            # Boost known product CDN URLs
-            if any(cdn in url for cdn in ["rukminim", "meeshocdn", "bigbasket", "nykaa"]):
+            if any(cdn in img_url for cdn in ["rukminim", "meeshocdn", "bigbasket", "nykaa"]):
                 score = 20
-            # Boost if URL indicates high resolution
-            if re.search(r"832|640|400|500|1000|1500", url):
-                score += 5
-            images.append({"url": url, "alt": alt, "score": score, "source": source})
+            if re.search(r"[_/](large|zoom|hires|hi-res|full|h_\d{3,4}|_SL\d{4}_)", img_url, re.I):
+                score = 22
+            images.append({"url": img_url, "alt": alt, "score": score, "source": source})
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
@@ -183,148 +236,150 @@ async def fetch_rendered_page(url: str, timeout_s: float = 30.0) -> dict:
                 "--metrics-recording-only",
                 "--no-first-run",
                 "--mute-audio",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-features=IsolateOrigins,site-per-process",
             ],
         )
-        context = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Linux; Android 10; SM-G981B) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0.6367.82 Mobile Safari/537.36"
-            ),
-            viewport={"width": 390, "height": 844},   # iPhone 12 viewport
-            locale="en-IN",
-        )
-
-        page = await context.new_page()
-
-        # Block unnecessary resources to speed up loading
-        await page.route(
-            "**/*.{woff,woff2,ttf,otf}",
-            lambda route: route.abort(),
-        )
-
-        final_url = url
-        rendered_html = ""
 
         try:
+            context = await browser.new_context(
+                user_agent=ctx_ua,
+                viewport=ctx_viewport,
+                locale="en-IN",
+                extra_http_headers={
+                    "Accept-Language": "en-IN,en;q=0.9",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                    "DNT": "1",
+                    "Upgrade-Insecure-Requests": "1",
+                },
+            )
+
+            # Hide navigator.webdriver
+            await context.add_init_script(f"""
+                Object.defineProperty(navigator, 'webdriver',
+                    {{ get: () => undefined }});
+                Object.defineProperty(navigator, 'plugins',
+                    {{ get: () => [1, 2, 3, 4] }});
+                Object.defineProperty(navigator, 'languages',
+                    {{ get: () => ['en-IN', 'en', 'en-US'] }});
+                Object.defineProperty(navigator, 'hardwareConcurrency',
+                    {{ get: () => {_hw_conc} }});
+                window.chrome = {{ runtime: {{}} }};
+            """)
+
+            page = await context.new_page()
+
+            # Block fonts — not needed, speeds up loading
+            await page.route("**/*.{woff,woff2,ttf,otf}", lambda r: r.abort())
+
+            # Small random delay — avoids Amazon rate-limit on rapid repeated requests
+            import asyncio as _asyncio
+            await _asyncio.sleep(_rnd.uniform(0.5, 2.0))
+
             await page.goto(url, timeout=int(timeout_s * 1000), wait_until="domcontentloaded")
             final_url = page.url
 
-            # Wait for product images to appear
+            # For Amazon wait until colorImages JS is available
+            if is_amazon:
+                try:
+                    await page.wait_for_function(
+                        "() => document.documentElement.innerHTML.includes('colorImages')",
+                        timeout=15000,
+                    )
+                except PWTimeout:
+                    pass  # Proceed even if blocked (CAPTCHA page)
+
+            # Wait for network to settle
             try:
-                await page.wait_for_load_state("networkidle", timeout=8000)
+                await page.wait_for_load_state("networkidle", timeout=10000)
             except PWTimeout:
-                pass  # Proceed even if not fully idle
+                pass
 
-            # Small delay to allow lazy-load images to start loading
-            await asyncio.sleep(1.5)
-
-            # Scroll down a bit to trigger lazy loading on gallery
+            # Scroll to trigger lazy-loaded gallery thumbnails
+            await _asyncio.sleep(1.2)
             await page.evaluate("window.scrollBy(0, 400)")
-            await asyncio.sleep(0.8)
+            await _asyncio.sleep(0.6)
             await page.evaluate("window.scrollTo(0, 0)")
 
-            # Get fully rendered HTML
             rendered_html = await page.content()
 
-            # ── Extract images from live DOM ──────────────────────────────────
-            img_elements = await page.query_selector_all("img")
-            for el in img_elements:
-                src     = await el.get_attribute("src") or ""
-                srcset  = await el.get_attribute("srcset") or ""
-                datasrc = await el.get_attribute("data-src") or ""
-                alt     = await el.get_attribute("alt") or ""
-
-                # Pick best URL from srcset if available
-                best = _parse_srcset(srcset) or datasrc or src
-                if best:
-                    _add(best, alt, "browser_img")
-
-            # ── Also check <picture><source> ──────────────────────────────────
-            source_els = await page.query_selector_all("picture source")
-            for el in source_els:
-                srcset = await el.get_attribute("srcset") or ""
-                best = _parse_srcset(srcset)
-                if best:
-                    _add(best, "", "browser_picture")
-
-        except PWTimeout:
-            raise TimeoutError(f"Browser timed out loading {url}")
-
-        # ── Gallery thumbnail interaction — trigger lazy-loaded images ─────────
-        # Flipkart and many other platforms only load high-res gallery images
-        # when the user clicks each thumbnail. We simulate this to discover all
-        # product images, especially back/side packaging images.
-        try:
-            # Common gallery thumbnail selectors across major e-commerce platforms
-            GALLERY_SELECTORS = [
-                # Flipkart
-                "._2KpZ6l img",             # Flipkart thumbnail strip
-                "._3BTv9X img",             # Flipkart alt thumbnail
-                "li._1l-4KG img",           # Flipkart list item thumb
-                # Amazon
-                "#altImages li img",        # Amazon alt images
-                ".imageThumbnail img",
-                # Generic
-                "[data-thumbnail] img",
-                ".gallery-thumb img",
-                ".product-thumb img",
-                ".thumbnail-image img",
-                ".thumb-gallery img",
-                ".image-gallery-thumbnail img",
-                "ul.pdp-thumbnails li img",
-            ]
-
-            thumb_count = 0
-            for selector in GALLERY_SELECTORS:
-                thumbs = await page.query_selector_all(selector)
-                if thumbs:
-                    for thumb in thumbs[:8]:   # click up to 8 thumbnails max
-                        try:
-                            await thumb.click(timeout=1500)
-                            await asyncio.sleep(0.4)   # brief wait for image network req
-                            thumb_count += 1
-                        except Exception:
-                            continue
-                    if thumb_count > 0:
-                        break  # found working selector — stop trying others
-
-            # After clicks, collect any newly loaded images
-            if thumb_count > 0:
-                await asyncio.sleep(0.8)  # allow batch of image requests to settle
-                new_imgs = await page.query_selector_all("img")
-                for el in new_imgs:
+            # ── Image extraction ─────────────────────────────────────────────
+            if is_amazon:
+                # Use strict whitelist extractor — colorImages JS + altImages DOM only
+                from bs4 import BeautifulSoup
+                from url_scanner.image_collector import _extract_amazon_gallery_images
+                amz_soup = BeautifulSoup(rendered_html, "lxml")
+                for img in _extract_amazon_gallery_images(rendered_html, amz_soup, final_url):
+                    if img["url"] and img["url"] not in seen_urls:
+                        seen_urls.add(img["url"])
+                        images.append(img)
+            else:
+                # Non-Amazon: scan live DOM elements
+                for el in await page.query_selector_all("img"):
                     src     = await el.get_attribute("src") or ""
                     srcset  = await el.get_attribute("srcset") or ""
                     datasrc = await el.get_attribute("data-src") or ""
                     alt     = await el.get_attribute("alt") or ""
                     best = _parse_srcset(srcset) or datasrc or src
                     if best:
-                        _add(best, alt, "browser_gallery_click")
+                        _add(best, alt, "browser_img")
 
-                # Also grab updated rendered HTML for state extraction
-                rendered_html = await page.content()
+                # <picture><source> — skip for Amazon (review photos)
+                for el in await page.query_selector_all("picture source"):
+                    srcset = await el.get_attribute("srcset") or ""
+                    best = _parse_srcset(srcset)
+                    if best:
+                        _add(best, "", "browser_picture")
 
-        except Exception:
-            pass  # Gallery interaction is best-effort — never crash the main fetch
+                # Gallery thumbnail clicks for non-Amazon SPAs (Flipkart etc.)
+                _GALLERY_SEL = [
+                    "._2KpZ6l img", "._3BTv9X img", "li._1l-4KG img",
+                    "[data-thumbnail] img", ".gallery-thumb img",
+                    ".product-thumb img", ".thumbnail-image img",
+                    ".image-gallery-thumbnail img", "ul.pdp-thumbnails li img",
+                ]
+                for selector in _GALLERY_SEL:
+                    thumbs = await page.query_selector_all(selector)
+                    if thumbs:
+                        clicked = 0
+                        for thumb in thumbs[:8]:
+                            try:
+                                await thumb.click(timeout=1500)
+                                await _asyncio.sleep(0.35)
+                                clicked += 1
+                            except Exception:
+                                continue
+                        if clicked:
+                            await _asyncio.sleep(0.8)
+                            for el in await page.query_selector_all("img"):
+                                src     = await el.get_attribute("src") or ""
+                                srcset  = await el.get_attribute("srcset") or ""
+                                datasrc = await el.get_attribute("data-src") or ""
+                                alt     = await el.get_attribute("alt") or ""
+                                best = _parse_srcset(srcset) or datasrc or src
+                                if best:
+                                    _add(best, alt, "browser_gallery_click")
+                            rendered_html = await page.content()
+                            break
+
+                # Embedded state extraction
+                for img in _extract_images_from_state(rendered_html, final_url):
+                    if img["url"] not in seen_urls:
+                        seen_urls.add(img["url"])
+                        images.append(img)
 
         finally:
-            await browser.close()
+            # Always close browser — even on exception
+            try:
+                await browser.close()
+            except Exception:
+                pass
 
-
-
-    # ── Extract from embedded application state ───────────────────────────────
-    state_images = _extract_images_from_state(rendered_html, final_url)
-    for img in state_images:
-        if img["url"] not in seen_urls:
-            seen_urls.add(img["url"])
-            images.append(img)
-
-    # Sort by score
     images.sort(key=lambda x: -x["score"])
-
     return {
         "html": rendered_html,
         "images": images,
         "strategy": "browser",
         "final_url": final_url,
     }
+
