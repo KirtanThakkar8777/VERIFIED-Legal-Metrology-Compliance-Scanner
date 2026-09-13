@@ -170,6 +170,17 @@ def _score_image_url(url: str, alt: str = "") -> int:
         else:
             score += 10
 
+    # JioMart CDN
+    if "jiomartjcp.com" in url or "jiomart.com" in url or "jiostatic.com" in url:
+        if "/original/" in url:
+            score += 22   # original quality
+        else:
+            score += 18
+
+    # BigBasket / Blinkit / Zepto / Swiggy CDN
+    if re.search(r"bigbasket\.com/media|blinkit\.com|zeptonow\.com|swiggy\.com", url):
+        score += 15
+
     # Cloudinary high-res transforms
     if re.search(r"h_\d{4}|w_\d{4}|q_\d{2,3}", url):
         score += 15
@@ -183,6 +194,7 @@ def _score_image_url(url: str, alt: str = "") -> int:
         score += 15
 
     return score
+
 
 
 def _parse_srcset_best(srcset: str) -> str:
@@ -369,8 +381,39 @@ def _extract_amazon_gallery_images(html_raw: str, soup: BeautifulSoup, base_url:
                 pass
 
     # ══════════════════════════════════════════════════════════════════════════
-    # FALLBACK: 0 images found — scan only the imageBlock container HTML
-    # (scoped to the gallery div, so reviews are never included)
+    # FALLBACK A: Scan entire raw HTML for Amazon CDN images
+    # Used when bot-blocked (no colorImages, no altImages, no landingImage)
+    # Scans the full page source — wider net than imageBlock-only.
+    # ══════════════════════════════════════════════════════════════════════════
+    if not results:
+        # Pattern matches any Amazon image CDN URL with a size transform
+        _ANY_AMZ_CDN = re.compile(
+            r"https?://(?:m\.media-amazon\.com|images-na\.ssl-images-amazon\.com)"
+            r"/images/I/([A-Za-z0-9+/]{8,25})"
+            r"(\._[^\"'\s<>]+_)?"
+            r"\.(?:jpg|jpeg|png|webp)",
+            re.IGNORECASE,
+        )
+        # Only look above the reviews section
+        search_html = html_above_reviews
+        seen_raw: set[str] = set()
+        for m in _ANY_AMZ_CDN.finditer(search_html):
+            raw_url = m.group(0)
+            img_id  = m.group(1)
+            if img_id in seen_raw:
+                continue
+            seen_raw.add(img_id)
+            # Upgrade to _SL1500_ max resolution
+            upgraded = re.sub(
+                r"(\._[^.]+_)?\.(?:jpg|jpeg|png|webp)$",
+                "._SL1500_.jpg",
+                raw_url,
+                flags=re.IGNORECASE,
+            )
+            _add(upgraded or raw_url, "", "html_cdn_fallback")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # FALLBACK B: If still 0, scan imageBlock container (original logic kept)
     # ══════════════════════════════════════════════════════════════════════════
     if not results:
         image_block = soup.find(id="imageBlock") or soup.find(id="dp-container")
@@ -467,9 +510,53 @@ def collect_images(html: str, base_url: str) -> list[dict]:
         images.sort(key=lambda x: -x["score"])
         return images[:MAX_IMAGES]
 
+
     # ════════════════════════════════════════════════════════════════════════════
-    # MYNTRA — CDN script extraction
+    # JIOMART — CDN image extraction
+    # JioMart uses cdn1.jiomartjcp.com and jiostatic.com
     # ════════════════════════════════════════════════════════════════════════════
+    is_jiomart = "jiomart.com" in base_url.lower()
+    if is_jiomart:
+        # Match JioMart CDN URLs — extract the original (non-resized) version
+        jiomart_imgs = re.findall(
+            r"https?://(?:cdn\d*\.jiomartjcp\.com|cdn\.jiomart\.com|"
+            r"jiostatic\.com|media\.jiomart\.com|cdn\.jiomartjcp\.in)"
+            r"/[^\s\"'<>\\]+\.(?:jpg|jpeg|png|webp)",
+            html, re.IGNORECASE,
+        )
+        seen_jio: set[str] = set()
+        for jio_url in jiomart_imgs:
+            # Skip theme/icon/logo assets — these are UI elements, not product images
+            lower = jio_url.lower()
+            if any(skip in lower for skip in ["/theme/assets/", "/icons/", "/logo", "/favicon"]):
+                continue
+            # Strip resize transform params — get original quality
+            orig = re.sub(r"/t\.\w+\([^)]*\)/", "/original/", jio_url)
+            orig = re.sub(r"\?.*$", "", orig)  # strip query params
+            if orig not in seen_jio:
+                seen_jio.add(orig)
+                _add(orig, "product", "jiomart_cdn")
+
+        # Also check JSON-LD images (JioMart embeds product images in ld+json)
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(script.string or "")
+                imgs = data.get("image", []) if isinstance(data, dict) else []
+                if isinstance(imgs, str):
+                    imgs = [imgs]
+                for img_url in imgs:
+                    if isinstance(img_url, str):
+                        _add(img_url, "product", "jiomart_jsonld")
+            except Exception:
+                pass
+
+        # OpenGraph
+        for meta in soup.find_all("meta", property="og:image"):
+            _add(meta.get("content", ""), "product", "og_image")
+
+        images.sort(key=lambda x: -x["score"])
+        return images[:MAX_IMAGES]
+
     if is_myntra:
         myntra_imgs = re.findall(
             r"https?://(?:assets\.myntassets\.com|assets\.myntra\.com)/assets/images/"

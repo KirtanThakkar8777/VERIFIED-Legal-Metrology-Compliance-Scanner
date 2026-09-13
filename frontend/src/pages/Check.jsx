@@ -84,16 +84,17 @@ function ScanProgress({ steps, platform, status }) {
   );
 }
 
-// ── OCR Image Card ─────────────────────────────────────────────────────────────
-// Compliance signal pill definitions — maps signal key → display label
+/// ── OCR Image Card ─────────────────────────────────────────────────────────────
+// Compliance signal pill definitions — maps signal key → display label (PCR 2011 §6 fields)
 const SIGNAL_PILLS = [
-  { key: "has_fssai",        label: "FSSAI",    color: "bg-green-100 text-green-800 border-green-300" },
-  { key: "has_mrp",          label: "MRP",      color: "bg-blue-100  text-blue-800  border-blue-300"  },
-  { key: "has_manufacturer", label: "Mfr.",     color: "bg-blue-100  text-blue-800  border-blue-300"  },
-  { key: "has_net_qty",      label: "Net Qty",  color: "bg-blue-100  text-blue-800  border-blue-300"  },
-  { key: "has_consumer_care",label: "Consumer", color: "bg-slate-100 text-slate-700 border-slate-300" },
-  { key: "has_date_batch",   label: "Date/Lot", color: "bg-slate-100 text-slate-700 border-slate-300" },
-  { key: "has_country",      label: "Origin",   color: "bg-slate-100 text-slate-700 border-slate-300" },
+  { key: "has_fssai",        label: "FSSAI / Importer Reg.", color: "bg-green-100 text-green-800 border-green-300" },
+  { key: "has_manufacturer", label: "Manufacturer / Importer", color: "bg-blue-100 text-blue-800 border-blue-300" },
+  { key: "has_mrp",          label: "MRP",                    color: "bg-blue-100 text-blue-800  border-blue-300" },
+  { key: "has_net_qty",      label: "Net Qty / Weight",       color: "bg-blue-100 text-blue-800  border-blue-300" },
+  { key: "has_date_batch",   label: "Mfg. / Expiry Date",    color: "bg-amber-100 text-amber-800 border-amber-300" },
+  { key: "has_consumer_care",label: "Consumer Care",          color: "bg-slate-100 text-slate-700 border-slate-300" },
+  { key: "has_country",      label: "Country of Origin",      color: "bg-slate-100 text-slate-700 border-slate-300" },
+  { key: "has_ingredients",  label: "Ingredients",            color: "bg-purple-100 text-purple-700 border-purple-300" },
 ];
 
 function OcrImageCard({ img, rank, onClick }) {
@@ -107,17 +108,32 @@ function OcrImageCard({ img, rank, onClick }) {
   // Active signal pills (only show what was actually detected)
   const activePills = SIGNAL_PILLS.filter(p => signals[p.key]);
   const isMarketingOnly = signals.is_marketing_only;
+  const fieldCount = activePills.length;
 
   return (
     <div className="group relative border border-border-main bg-ledger flex flex-col overflow-hidden
                     transition-all duration-200 hover:shadow-md hover:border-ink-navy/40 hover:-translate-y-0.5">
 
+      {/* Field count badge — top-right corner */}
+      {fieldCount > 0 && (
+        <div className="absolute top-1.5 right-1.5 z-10 bg-ink-navy text-ink-light text-[9px]
+                        font-mono font-bold px-1.5 py-0.5 rounded-sm leading-none shadow">
+          {fieldCount} field{fieldCount !== 1 ? "s" : ""}
+        </div>
+      )}
+
+      {/* Image rank badge — top-left */}
+      <div className="absolute top-1.5 left-1.5 z-10 bg-ledger/80 border border-border-main
+                      text-[9px] font-mono text-muted-fg px-1 py-0.5 rounded-sm leading-none">
+        #{rank}
+      </div>
+
       {/* Clickable image area */}
       <div
         className="relative bg-[#f5f2ec] flex items-center justify-center cursor-pointer"
-        style={{ aspectRatio: "1 / 1" }}
+        style={{ aspectRatio: "4 / 3" }}
         onClick={() => !failed && onClick(img.url)}
-        title={failed ? "Image unavailable" : `Click to enlarge — OCR Image ${String(rank).padStart(2, "0")}`}
+        title={failed ? "Image unavailable" : `Click to enlarge — Packaging Image ${String(rank).padStart(2, "0")}`}
       >
         {failed ? (
           <div className="flex flex-col items-center justify-center gap-1 px-2 py-4 text-center w-full h-full">
@@ -128,7 +144,7 @@ function OcrImageCard({ img, rank, onClick }) {
           <>
             <img
               src={img.url}
-              alt={`OCR Image ${String(rank).padStart(2, "0")}`}
+              alt={`Packaging Image ${String(rank).padStart(2, "0")}`}
               onError={() => setFailed(true)}
               className="w-full h-full object-contain"
               loading="lazy"
@@ -137,39 +153,43 @@ function OcrImageCard({ img, rank, onClick }) {
             <div className="absolute inset-0 bg-ink-navy/0 group-hover:bg-ink-navy/60 transition-all duration-200
                             flex items-center justify-center opacity-0 group-hover:opacity-100">
               <span className="mono-label text-ink-light text-[10px] tracking-widest border border-ink-light/60 px-2 py-1">
-                VIEW IMAGE
+                VIEW FULL IMAGE
               </span>
             </div>
           </>
         )}
       </div>
 
-      {/* Compliance signal pills */}
-      {(activePills.length > 0 || isMarketingOnly) && (
-        <div className="flex flex-wrap gap-0.5 px-2 pt-1.5">
-          {activePills.map(p => (
-            <span key={p.key}
-              className={`inline-block text-[8px] font-mono font-semibold px-1 py-0.5 border rounded-sm ${p.color}`}>
-              {p.label} ✓
-            </span>
-          ))}
-          {isMarketingOnly && (
-            <span className="inline-block text-[8px] font-mono font-semibold px-1 py-0.5 border rounded-sm
-                             bg-red-50 text-red-700 border-red-300">
-              MARKETING ✗
-            </span>
-          )}
-        </div>
-      )}
+      {/* ── LM Field Pills — shown BELOW image, always visible ── */}
+      <div className="px-2 pt-2 pb-1 flex flex-col gap-1">
+        {activePills.length > 0 ? (
+          <div className="flex flex-wrap gap-1">
+            {activePills.map(p => (
+              <span key={p.key}
+                className={`inline-flex items-center gap-0.5 text-[9px] font-mono font-semibold
+                            px-1.5 py-0.5 border rounded-sm ${p.color}`}>
+                ✓ {p.label}
+              </span>
+            ))}
+          </div>
+        ) : isMarketingOnly ? (
+          <span className="inline-block text-[9px] font-mono font-semibold px-1.5 py-0.5 border rounded-sm
+                           bg-red-50 text-red-700 border-red-300">
+            ✗ No LM fields detected
+          </span>
+        ) : (
+          <span className="text-[9px] font-mono text-muted-fg italic">Analysing…</span>
+        )}
+      </div>
 
-      {/* Footer: label + score + why-selected toggle */}
-      <div className="px-2 pt-1.5 pb-1 border-t border-border-main bg-card-bg mt-auto">
+      {/* Footer: score + why-selected toggle */}
+      <div className="px-2 pt-1 pb-1.5 border-t border-border-main bg-card-bg mt-auto">
         <div className="flex items-center justify-between">
           <p className="mono-label text-muted-fg text-[10px] tracking-wider">
-            OCR IMAGE {String(rank).padStart(2, "0")}
+            PACKAGING IMAGE {String(rank).padStart(2, "0")}
           </p>
           {score !== null && (
-            <span className="text-[10px] font-mono text-ink-navy font-semibold">
+            <span className={`text-[10px] font-mono font-semibold ${score >= 0 ? "text-ink-navy" : "text-muted-fg"}`}>
               {score > 0 ? "+" : ""}{score}
             </span>
           )}
@@ -196,28 +216,36 @@ function OcrImageCard({ img, rank, onClick }) {
   );
 }
 
-
 // ── OCR Image Panel ────────────────────────────────────────────────────────────
 function OcrImagePanel({ images, scanStatus, onOpenLightbox }) {
-  if (!images || images.length === 0) return null;
-
   const isOcrRunning = scanStatus === "processing";
+  const hasImages = images && images.length > 0;
+
+  // Always render the panel once scan has started (show empty state if 0 images)
+  if (!hasImages && !isOcrRunning) return null;
 
   return (
-    <div className="border border-border-main bg-card-bg p-4 mt-3">
+    <div className="border border-border-main bg-card-bg mt-3">
       {/* Header */}
-      <div className="flex items-center justify-between mb-3">
-        <p className="mono-label text-muted-fg text-xs">OCR SELECTED IMAGES</p>
-        <div className="flex items-center gap-2">
-          <span className="text-[10px] font-mono text-muted-fg">
-            {images.length} image{images.length !== 1 ? "s" : ""}
-          </span>
+      <div className="flex items-center justify-between px-4 py-2.5 border-b border-border-main">
+        <div>
+          <p className="mono-label text-muted-fg text-xs">PACKAGING IMAGES SENT TO OCR</p>
+          <p className="text-[10px] font-mono text-muted-fg mt-0.5">
+            Images selected based on detected Legal Metrology fields (PCR 2011 §6)
+          </p>
+        </div>
+        <div className="flex items-center gap-2 ml-4 shrink-0">
+          {hasImages && (
+            <span className="text-[10px] font-mono text-muted-fg">
+              {images.length} image{images.length !== 1 ? "s" : ""}
+            </span>
+          )}
           {isOcrRunning && (
             <span className="mono-label text-[10px] text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5">
               ⟳ OCR RUNNING
             </span>
           )}
-          {!isOcrRunning && (
+          {!isOcrRunning && hasImages && (
             <span className="mono-label text-[10px] text-[#16a34a] bg-[#16a34a]/5 border border-[#16a34a]/30 px-1.5 py-0.5">
               ✓ OCR COMPLETE
             </span>
@@ -225,24 +253,196 @@ function OcrImagePanel({ images, scanStatus, onOpenLightbox }) {
         </div>
       </div>
 
-      {/* Image grid — 4 col desktop, 2 col tablet, 1 col mobile */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-        {images.map((img) => (
-          <OcrImageCard
-            key={img.rank}
-            img={img}
-            rank={img.rank}
-            onClick={onOpenLightbox}
-          />
-        ))}
-      </div>
-
-      <p className="text-[10px] text-muted-fg font-mono mt-2">
-        These are the exact images being analysed by OCR for compliance data extraction.
-      </p>
+      {/* Image grid — 2 col mobile, 3 col tablet+, up to 4 col wide */}
+      {hasImages ? (
+        <div className="p-4">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+            {images.map((img) => (
+              <OcrImageCard
+                key={img.rank}
+                img={img}
+                rank={img.rank}
+                onClick={onOpenLightbox}
+              />
+            ))}
+          </div>
+          <p className="text-[10px] text-muted-fg font-mono mt-3 pt-2 border-t border-border-main">
+            ℹ Click any image to enlarge · Pill badges show which PCR 2011 §6 fields were detected in each image
+          </p>
+        </div>
+      ) : (
+        /* Empty state — bot-blocked or no images found */
+        <div className="p-6 text-center">
+          <p className="text-2xl mb-2">🔍</p>
+          <p className="text-sm font-mono text-muted-fg">No packaging images could be retrieved.</p>
+          <p className="text-xs font-mono text-muted-fg mt-1">
+            This page may be bot-protected. Try the Label Image tab to upload a photo manually.
+          </p>
+        </div>
+      )}
     </div>
   );
 }
+
+
+// ── LM Fields Panel (PCR 2011 §6 mandatory fields summary) ────────────────────
+// Shown below the image panel after scan completes. Displays extracted values
+// for all 8 mandatory Legal Metrology (Packaged Commodities) fields.
+
+const LM_FIELD_DEFS = [
+  {
+    key:   "manufacturer",
+    label: "Manufacturer / Importer Name & Address",
+    icon:  "🏭",
+    pcr:   "§6(1)",
+    hint:  "Name and address of the manufacturer, packer, or importer",
+  },
+  {
+    key:   "net_quantity",
+    label: "Net Quantity / Net Weight / Net Volume",
+    icon:  "⚖️",
+    pcr:   "§6(2)",
+    hint:  "Net quantity in standard unit (g, ml, kg, L, etc.)",
+  },
+  {
+    key:   "mfg_date",
+    label: "Month & Year of Manufacture / Packing",
+    icon:  "📅",
+    pcr:   "§6(3)",
+    hint:  "Month and year when product was manufactured or packed",
+  },
+  {
+    key:   "expiry_date",
+    label: "Best Before / Expiry Date",
+    icon:  "⏳",
+    pcr:   "§6(4)",
+    hint:  "Best before date or expiry date",
+  },
+  {
+    key:   "mrp",
+    label: "Maximum Retail Price (MRP)",
+    icon:  "💰",
+    pcr:   "§6(5)",
+    hint:  "MRP inclusive of all taxes",
+  },
+  {
+    key:   "consumer_care",
+    label: "Consumer Care / Grievance Contact",
+    icon:  "📞",
+    pcr:   "§6(6)",
+    hint:  "Phone number, email, or address for consumer complaints",
+  },
+  {
+    key:   "country_of_origin",
+    label: "Country of Origin",
+    icon:  "🌐",
+    pcr:   "§6(7)",
+    hint:  "Country where product was manufactured / assembled",
+  },
+  {
+    key:   "fssai",
+    label: "FSSAI Licence / Importer Registration No.",
+    icon:  "🔖",
+    pcr:   "§6(8)",
+    hint:  "14-digit FSSAI licence number or importer registration",
+  },
+];
+
+function LmFieldsPanel({ lmFields }) {
+  if (!lmFields) return null;
+
+  const found  = LM_FIELD_DEFS.filter(f => lmFields[f.key]?.trim());
+  const total  = LM_FIELD_DEFS.length;
+  const pct    = Math.round((found.length / total) * 100);
+
+  const coverageColor =
+    pct >= 75 ? "text-[#16a34a]" :
+    pct >= 40 ? "text-amber-700" :
+    "text-[#C41E3A]";
+
+  const barColor =
+    pct >= 75 ? "bg-[#16a34a]" :
+    pct >= 40 ? "bg-amber-500" :
+    "bg-[#C41E3A]";
+
+  return (
+    <div className="border border-border-main bg-card-bg mt-3">
+      {/* Header */}
+      <div className="flex items-center justify-between px-4 py-2.5 border-b border-border-main">
+        <div>
+          <p className="mono-label text-muted-fg text-xs">EXTRACTED LABEL FIELDS — PCR 2011 §6</p>
+          <p className="text-[10px] font-mono text-muted-fg mt-0.5">
+            Mandatory declarations required on every packaged commodity
+          </p>
+        </div>
+        <div className="flex flex-col items-end gap-1 ml-4 shrink-0">
+          <span className={`text-sm font-mono font-bold ${coverageColor}`}>
+            {found.length}/{total} fields
+          </span>
+          {/* Coverage bar */}
+          <div className="w-20 h-1.5 bg-border-main rounded-full overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-all duration-500 ${barColor}`}
+              style={{ width: `${pct}%` }}
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* Fields table */}
+      <div className="divide-y divide-border-main">
+        {LM_FIELD_DEFS.map((f) => {
+          const value = lmFields[f.key]?.trim() || "";
+          const isFound = !!value;
+          return (
+            <div key={f.key} className={`px-4 py-2.5 flex items-start gap-3
+              ${isFound ? "" : "opacity-70"}`}>
+              {/* Status icon */}
+              <div className={`mt-0.5 shrink-0 w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold
+                ${isFound
+                  ? "bg-[#16a34a]/10 text-[#16a34a] border border-[#16a34a]/30"
+                  : "bg-[#C41E3A]/8 text-[#C41E3A] border border-[#C41E3A]/25"
+                }`}>
+                {isFound ? "✓" : "✗"}
+              </div>
+
+              {/* Field info */}
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-[10px] font-mono text-muted-fg">{f.icon}</span>
+                  <p className="text-xs font-semibold text-ink-navy leading-tight">{f.label}</p>
+                  <span className="mono-label text-[9px] text-seal-gold">{f.pcr}</span>
+                </div>
+                {isFound ? (
+                  <p className="text-xs font-mono text-ink-navy mt-0.5 break-words leading-relaxed
+                                border-l-2 border-[#16a34a]/40 pl-2 ml-0.5">
+                    {value}
+                  </p>
+                ) : (
+                  <p className="text-[10px] font-mono text-muted-fg mt-0.5 italic">
+                    Not detected — {f.hint}
+                  </p>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Footer */}
+      <div className="px-4 py-2 border-t border-border-main bg-card-bg">
+        <p className="text-[10px] font-mono text-muted-fg">
+          {pct >= 75
+            ? "✓ Good field coverage — proceed to Run Compliance Scan below."
+            : pct >= 40
+            ? "⚠ Partial coverage — some fields missing. You may still run the compliance scan."
+            : "✗ Low coverage — consider uploading label images manually via the Label Image tab for better results."}
+        </p>
+      </div>
+    </div>
+  );
+}
+
 
 // ── Lightbox ───────────────────────────────────────────────────────────────────
 function Lightbox({ url, onClose }) {
@@ -532,7 +732,10 @@ export default function Check() {
   // Raw combined text (webpage + OCR) used for compliance checks — separate from
   // formatted_text which is displayed in the text tab for human review.
   const [complianceText, setComplianceText] = useState("");
+  // 8 mandatory PCR 2011 §6 fields extracted from the product (shown in LmFieldsPanel)
+  const [lmFields, setLmFields]           = useState(null);
   const pollRef = useRef(null);
+
 
   // Clear poll on unmount
   useEffect(() => {
@@ -600,15 +803,21 @@ export default function Check() {
             setComplianceText(result.compliance_text);
           }
 
+          // ── Store 8 mandatory PCR 2011 §6 field values for UI display ──
+          if (result.lm_fields) {
+            setLmFields(result.lm_fields);
+          }
+
           // ── Auto-fill metadata fields ─────────────────────────────────
           if (result.product_name) setProductName(result.product_name);
           if (result.category)     setCategory(result.category);
           if (result.platform)     setPlatform(result.platform);
 
-          // Stay on URL tab so user can see selected images and review
+          // Stay on URL tab so user can see images, extracted fields, then run compliance
           setFetchBtnLabel("Fetch Again");
-          setStatus("✓ Product data extracted — review the information below, then Run Compliance Scan.");
+          setStatus("✓ Extraction complete — review the images and fields below, then Run Compliance Scan.");
           setLoading(false);
+
         } else if (data.status === "error") {
           clearInterval(pollRef.current);
           setError(data.error || "Scan failed. Please try another URL or use Paste Text.");
@@ -655,8 +864,10 @@ export default function Check() {
     setOcrSelectedImages([]);   // clear previous scan's images
     setLightboxImage(null);
     setComplianceText("");      // clear previous scan's compliance text
+    setLmFields(null);          // clear previous scan's LM fields
     setLoading(true);
     setFetchBtnLabel("⟳ Fetching...");
+
 
     try {
       const { data } = await api.post("/api/url-scan", { url: trimmedUrl });
@@ -875,6 +1086,11 @@ export default function Check() {
                   onOpenLightbox={setLightboxImage}
                 />
 
+                {/* ── LM Fields Summary Panel ──────────────────────────────────
+                    Appears after scan completes. Shows all 8 mandatory PCR 2011
+                    §6 fields with extracted values (✓ found / ✗ not detected).
+                    After reviewing, user clicks Run Compliance Scan below.      */}
+                <LmFieldsPanel lmFields={lmFields} />
 
                 {/* Extracted text notice (only after fetch completes) */}
                 {text && scanStatus === "done" && (

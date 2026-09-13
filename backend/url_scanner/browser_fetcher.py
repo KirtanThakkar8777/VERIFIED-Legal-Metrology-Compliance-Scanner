@@ -214,9 +214,13 @@ async def _playwright_core(url: str, timeout_s: float) -> dict:
         if img_url and img_url not in seen_urls and _is_useful_image(img_url):
             seen_urls.add(img_url)
             score = 15
-            if any(cdn in img_url for cdn in ["rukminim", "meeshocdn", "bigbasket", "nykaa"]):
+            if any(cdn in img_url for cdn in [
+                "rukminim", "meeshocdn", "bigbasket", "nykaa",
+                "jiomartjcp.com", "jiostatic.com", "jiomart.com",
+                "blinkit", "zeptonow",
+            ]):
                 score = 20
-            if re.search(r"[_/](large|zoom|hires|hi-res|full|h_\d{3,4}|_SL\d{4}_)", img_url, re.I):
+            if re.search(r"[_/](large|zoom|hires|hi-res|full|h_\d{3,4}|_SL\d{4}_|/original/)", img_url, re.I):
                 score = 22
             images.append({"url": img_url, "alt": alt, "score": score, "source": source})
 
@@ -238,6 +242,8 @@ async def _playwright_core(url: str, timeout_s: float) -> dict:
                 "--mute-audio",
                 "--disable-blink-features=AutomationControlled",
                 "--disable-features=IsolateOrigins,site-per-process",
+                "--lang=en-IN",
+                "--window-size=1366,768",
             ],
         )
 
@@ -246,37 +252,77 @@ async def _playwright_core(url: str, timeout_s: float) -> dict:
                 user_agent=ctx_ua,
                 viewport=ctx_viewport,
                 locale="en-IN",
+                timezone_id="Asia/Kolkata",
                 extra_http_headers={
-                    "Accept-Language": "en-IN,en;q=0.9",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-                    "DNT": "1",
+                    "Accept-Language": "en-IN,en;q=0.9,hi;q=0.8",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                    "Cache-Control": "max-age=0",
                     "Upgrade-Insecure-Requests": "1",
+                    "Sec-CH-UA": f'"Chromium";v="{_chrome_ver}", "Google Chrome";v="{_chrome_ver}", "Not-A.Brand";v="99"',
+                    "Sec-CH-UA-Mobile": "?0",
+                    "Sec-CH-UA-Platform": '"Windows"',
+                    "Referer": "https://www.google.com/",
                 },
             )
 
-            # Hide navigator.webdriver
+            # ── Stealth: mask all automation signals ──────────────────────────
             await context.add_init_script(f"""
+                // Hide webdriver flag
                 Object.defineProperty(navigator, 'webdriver',
                     {{ get: () => undefined }});
+                // Fake plugins array (real Chrome has plugins)
                 Object.defineProperty(navigator, 'plugins',
-                    {{ get: () => [1, 2, 3, 4] }});
+                    {{ get: () => [
+                        {{ name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer' }},
+                        {{ name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai' }},
+                        {{ name: 'Native Client', filename: 'internal-nacl-plugin' }},
+                    ] }});
                 Object.defineProperty(navigator, 'languages',
-                    {{ get: () => ['en-IN', 'en', 'en-US'] }});
+                    {{ get: () => ['en-IN', 'en', 'en-US', 'hi'] }});
                 Object.defineProperty(navigator, 'hardwareConcurrency',
                     {{ get: () => {_hw_conc} }});
-                window.chrome = {{ runtime: {{}} }};
+                Object.defineProperty(navigator, 'deviceMemory',
+                    {{ get: () => 8 }});
+                Object.defineProperty(navigator, 'platform',
+                    {{ get: () => 'Win32' }});
+                // Chrome object (missing in headless)
+                window.chrome = {{
+                    runtime: {{}},
+                    loadTimes: function() {{}},
+                    csi: function() {{}},
+                    app: {{}}
+                }};
+                // Screen dimensions
+                Object.defineProperty(screen, 'width',  {{ get: () => {_vp_w} }});
+                Object.defineProperty(screen, 'height', {{ get: () => {_vp_h} }});
+                Object.defineProperty(screen, 'availWidth',  {{ get: () => {_vp_w} }});
+                Object.defineProperty(screen, 'availHeight', {{ get: () => {_vp_h - 40} }});
+                // WebGL renderer spoof
+                const origGetParam = WebGLRenderingContext.prototype.getParameter;
+                WebGLRenderingContext.prototype.getParameter = function(param) {{
+                    if (param === 37446) return 'Intel Inc.';
+                    if (param === 37445) return 'Intel Iris OpenGL Engine';
+                    return origGetParam.call(this, param);
+                }};
+                // Notification permission (real browsers have this)
+                if (window.Notification) {{
+                    Object.defineProperty(Notification, 'permission', {{ get: () => 'default' }});
+                }}
             """)
 
             page = await context.new_page()
 
-            # Block fonts — not needed, speeds up loading
+            # Block fonts and analytics — speeds up load, doesn't affect images
             await page.route("**/*.{woff,woff2,ttf,otf}", lambda r: r.abort())
+            await page.route("**/{analytics,beacon,tracking,pixel}**", lambda r: r.abort())
 
             # Small random delay — avoids Amazon rate-limit on rapid repeated requests
             import asyncio as _asyncio
-            await _asyncio.sleep(_rnd.uniform(0.5, 2.0))
+            await _asyncio.sleep(_rnd.uniform(1.0, 2.5))
 
-            await page.goto(url, timeout=int(timeout_s * 1000), wait_until="domcontentloaded")
+            # Use 'load' for Amazon so the colorImages JS block has time to execute
+            wait_event = "load" if is_amazon else "domcontentloaded"
+            await page.goto(url, timeout=int(timeout_s * 1000), wait_until=wait_event)
             final_url = page.url
 
             # For Amazon wait until colorImages JS is available
@@ -284,7 +330,7 @@ async def _playwright_core(url: str, timeout_s: float) -> dict:
                 try:
                     await page.wait_for_function(
                         "() => document.documentElement.innerHTML.includes('colorImages')",
-                        timeout=15000,
+                        timeout=18000,
                     )
                 except PWTimeout:
                     pass  # Proceed even if blocked (CAPTCHA page)
@@ -295,11 +341,25 @@ async def _playwright_core(url: str, timeout_s: float) -> dict:
             except PWTimeout:
                 pass
 
+            # JioMart-specific: wait for the product spec table to render
+            # (the React app populates manufacturer/FSSAI/country after JS loads)
+            is_jiomart = "jiomart.com" in url.lower()
+            if is_jiomart:
+                try:
+                    await page.wait_for_function(
+                        "() => document.body.innerText.includes('Manufacturer') || "
+                        "document.body.innerText.includes('Net Quantity')",
+                        timeout=15000,
+                    )
+                except PWTimeout:
+                    pass  # proceed with whatever we have
+
             # Scroll to trigger lazy-loaded gallery thumbnails
-            await _asyncio.sleep(1.2)
-            await page.evaluate("window.scrollBy(0, 400)")
-            await _asyncio.sleep(0.6)
+            await _asyncio.sleep(1.5)
+            await page.evaluate("window.scrollBy(0, 500)")
+            await _asyncio.sleep(0.8)
             await page.evaluate("window.scrollTo(0, 0)")
+            await _asyncio.sleep(0.5)
 
             rendered_html = await page.content()
 

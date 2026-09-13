@@ -48,7 +48,6 @@ def extract(soup: BeautifulSoup, full_text: str) -> dict:
     for script in soup.find_all("script", id=re.compile(r"__NEXT_DATA__|__NUXT_DATA__")):
         try:
             data = json.loads(script.string or "")
-            # Generic search for product name in nested data
             def _find_product_name(obj, depth=0):
                 if depth > 4:
                     return
@@ -70,11 +69,38 @@ def extract(soup: BeautifulSoup, full_text: str) -> dict:
         except Exception:
             pass
 
+    # Try JSON-LD offers.price for MRP
+    for script in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(script.string or "")
+            if isinstance(data, dict):
+                offers = data.get("offers", {})
+                price = (offers.get("price") if isinstance(offers, dict) else None)
+                if price and not result.get("mrp"):
+                    result["mrp"] = str(price)
+                result.setdefault("product_name", data.get("name", ""))
+        except Exception:
+            pass
+
     # Table rows with compliance content
     rows = _table_rows(soup)
     for k, v in rows.items():
         if _is_compliance(k):
             result[k] = v[:300]
+
+    # Map common table row keys to standard fields
+    for mfr_key in ["Manufacturer", "Marketed by", "Manufactured by", "Packer", "Manufacturer Name"]:
+        if rows.get(mfr_key) and not result.get("manufacturer_raw"):
+            result["manufacturer_raw"] = rows[mfr_key][:300]
+            break
+    for qty_key in ["Net Quantity", "Net Weight", "Net Content", "Item Weight", "Unit Count"]:
+        if rows.get(qty_key) and not result.get("net_quantity"):
+            result["net_quantity"] = rows[qty_key][:80]
+            break
+    for coo_key in ["Country of Origin", "Country Of Origin", "Made In"]:
+        if rows.get(coo_key) and not result.get("country_of_origin"):
+            result["country_of_origin"] = rows[coo_key][:50]
+            break
 
     # Remove scripts/styles for clean text extraction
     for tag in soup(["script", "style", "nav", "footer", "header", "aside", "noscript"]):
@@ -90,38 +116,69 @@ def extract(soup: BeautifulSoup, full_text: str) -> dict:
             compliance_paragraphs.append(t)
     result["compliance_text"] = "\n".join(compliance_paragraphs[:20])
 
-    # MRP regex
+    # MRP — try explicit label first, then ₹ symbol
     mrp_m = re.search(r"M\.?R\.?P\.?\s*[:\s₹Rs.]*\s*([\d,]+\.?\d{0,2})", full_text, re.IGNORECASE)
     if mrp_m:
         result["mrp"] = mrp_m.group(1).replace(",", "")
+    elif not result.get("mrp"):
+        rupee_m = re.search(r"₹\s*([\d,]+\.?\d{0,2})", full_text)
+        if rupee_m:
+            candidate = rupee_m.group(1).replace(",", "")
+            try:
+                if 1 <= float(candidate) <= 100000:
+                    result["mrp"] = candidate
+                    result["price_block"] = f"₹{candidate}"
+            except ValueError:
+                pass
+
+    # Net Quantity
+    if not result.get("net_quantity"):
+        qty = re.search(
+            r"Net\s*(?:Quantity|Weight|Content|Vol(?:ume)?)\s*[:\-]?\s*([\d.,]+\s*(?:kg|g|ml|l(?:iter|itre)?|gm|gms)\b[^,\n]{0,30})",
+            full_text, re.IGNORECASE
+        )
+        if qty:
+            result["net_quantity"] = qty.group(1).strip()
 
     # Country of Origin
-    coo = re.search(r"Country\s*of\s*Origin\s*[:\-]?\s*([A-Za-z\s]{3,30})(?:\n|$|\||\,)",
-                    full_text, re.IGNORECASE)
-    if coo:
-        result["country_of_origin"] = coo.group(1).strip()
+    if not result.get("country_of_origin"):
+        coo = re.search(r"Country\s*of\s*Origin\s*[:\-]?\s*([A-Za-z\s]{3,30})(?:\n|$|\||,)",
+                        full_text, re.IGNORECASE)
+        if coo:
+            result["country_of_origin"] = coo.group(1).strip()
 
-    # FSSAI
-    fssai = re.search(r"\b([1-9]\d{13})\b", full_text)
-    if fssai:
-        result["fssai"] = fssai.group(1)
+    # FSSAI (14-digit number)
+    fssai_m = re.search(
+        r"(?:fssai|lic(?:ence|ense)?\s*no)[^0-9]{0,30}([1-9]\d{13})",
+        full_text, re.IGNORECASE
+    )
+    if fssai_m:
+        result["fssai"] = fssai_m.group(1)
+    else:
+        bare = re.search(r"\b([1-9]\d{13})\b", full_text)
+        if bare:
+            result["fssai"] = bare.group(1)
 
     # Manufacturer
-    mfr = re.search(
-        r"(?:Manufactured|Marketed|Packed|Processed)\s*(?:and\s+\w+\s*)*[Bb]y\s*[:\-]?\s*([^\n\.]{5,120})",
-        full_text
-    )
-    if mfr:
-        result["manufacturer_raw"] = mfr.group(1).strip()
+    if not result.get("manufacturer_raw"):
+        mfr = re.search(
+            r"(?:Manufactured|Marketed|Packed|Processed)\s*(?:and\s+\w+\s*)*[Bb]y\s*[:\-]?\s*([^\n\.]{5,120})",
+            full_text
+        )
+        if mfr:
+            result["manufacturer_raw"] = mfr.group(1).strip()
 
     # Best before
     bb = re.search(r"(?:best\s*before|shelf\s*life|expiry)[:\s]*([^\n|]{4,60})", full_text, re.IGNORECASE)
     if bb:
         result["best_before"] = bb.group(1).strip()
 
-    # Consumer care phone
-    phone = re.search(r"(?:1800[\s\-]?[\d\s\-]{7,12}|\+91[\s\-]?\d{10})", full_text)
+    # Consumer care phone + email
+    phone = re.search(r"(?:1800[\s\-]?[\d\s\-]{7,12}|\+91[\s\-]?\d{10}|0\d{9,10})", full_text)
     if phone:
         result["consumer_care_phone"] = phone.group(0).strip()
+    email = re.search(r"[\w.+\-]+@[\w\-]+\.[\w.]+", full_text)
+    if email:
+        result["consumer_care_email"] = email.group(0)
 
     return result

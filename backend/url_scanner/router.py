@@ -202,6 +202,8 @@ async def _run_scan(scan_id: str, url: str) -> None:
             from url_scanner.adapters.meesho import extract as adapter_extract
         elif adapter_key == "myntra":
             from url_scanner.adapters.myntra import extract as adapter_extract
+        elif adapter_key == "jiomart":
+            from url_scanner.adapters.jiomart import extract as adapter_extract
         else:
             from url_scanner.adapters.generic import extract as adapter_extract
 
@@ -283,11 +285,10 @@ async def _run_scan(scan_id: str, url: str) -> None:
                 browser_used = True
 
                 # ── CRITICAL: Re-extract ALL metadata from browser HTML ────────
-                # The static fetch returned Amazon's CAPTCHA page (3,793 bytes)
-                # with no product data. The browser got the real 2MB+ rendered page.
-                # Re-run the full extraction pipeline on the browser HTML so that
-                # product name, manufacturer, MRP, FSSAI, country, etc. are found.
-                if rendered_html and html_size > 50_000:
+                # For Flipkart/Meesho/JioMart the static page has NO product data.
+                # The browser got the real rendered page with all fields.
+                # Re-run the full extraction pipeline on the browser HTML.
+                if rendered_html and html_size > 5_000:
                     try:
                         from bs4 import BeautifulSoup as _BS
                         from url_scanner.structured_extractor import extract_structured_data as _esd
@@ -309,16 +310,27 @@ async def _run_scan(scan_id: str, url: str) -> None:
                             if v and not structured.get(k):
                                 structured[k] = v
 
-                        # Merge adapter data — always take browser values for key fields
+                        # These fields are ONLY available from the browser-rendered page;
+                        # always overwrite with browser values regardless of existing data.
+                        _always_overwrite = {
+                            "product_name", "brand", "mrp", "net_quantity",
+                            "manufacturer_raw", "packer_raw", "importer_raw",
+                            "country_of_origin", "fssai", "best_before",
+                            "consumer_care_phone", "consumer_care_email",
+                            "description", "price_block", "feature_bullets",
+                            "mfg_date",
+                        }
+
                         for k, v in browser_adapter_data.items():
-                            if v and not adapter_data.get(k):
+                            if v and (k in _always_overwrite or not adapter_data.get(k)):
                                 adapter_data[k] = v
-                            elif v and k in ("product_name", "brand", "mrp",
-                                             "manufacturer_raw", "packer_raw",
-                                             "country_of_origin", "fssai",
-                                             "description", "price_block",
-                                             "feature_bullets"):
-                                adapter_data[k] = v  # always overwrite with browser data
+
+                        # Also add browser adapter's product_image_urls to the image pool
+                        browser_img_urls = browser_adapter_data.pop("product_image_urls", []) or []
+                        for img_url in browser_img_urls:
+                            if img_url and img_url not in seen_img_urls:
+                                all_images.append({"url": img_url, "alt": "product", "score": 18, "source": "browser_adapter"})
+                                seen_img_urls.add(img_url)
 
                         web_name_new = adapter_data.get("product_name") or structured.get("name") or ""
                         job["steps"][-1]["done"] = True
@@ -481,6 +493,85 @@ async def _run_scan(scan_id: str, url: str) -> None:
             for img in all_images[:12]
         ]
 
+        # ── Step 8½: Extract entities from FULL webpage text (pre-OCR baseline) ──
+        # Before running OCR on images, extract all LM fields from the product
+        # page itself. Many e-commerce sites list manufacturer, FSSAI, country,
+        # net qty, MRP in the product details table — no image needed for those.
+        # OCR results will override/supplement these where images have richer data.
+        _add_step(scan_id, "⟳ Extracting product details from webpage text...", done=False)
+
+        from url_scanner.intelligence.entity_extractor import extract_entities
+
+        # Build comprehensive web text: all adapter fields + full page text + structured
+        web_text_parts: list[str] = []
+
+        # 1. All string values from adapter_data (product details table, bullets, etc.)
+        for _k, _v in adapter_data.items():
+            if isinstance(_v, str) and _v.strip():
+                web_text_parts.append(_v)
+            elif isinstance(_v, list):
+                web_text_parts.extend([str(x) for x in _v if str(x).strip()])
+
+        # 2. Full visible page text (catches text that adapters may miss)
+        if full_text:
+            web_text_parts.append(full_text[:8000])   # first 8K chars (product detail area)
+
+        # 3. Structured data (JSON-LD / OpenGraph)
+        for _k, _v in structured.items():
+            if isinstance(_v, str) and _v.strip():
+                web_text_parts.append(_v)
+
+        web_corpus = "\n".join(filter(None, web_text_parts))
+        web_entities: dict = {}
+        if web_corpus.strip():
+            web_entities = extract_entities(web_corpus)
+
+        # Show what was found on the webpage (separate from OCR)
+        _web_found_fields = []
+        if web_entities.get("manufacturer_raw") or web_entities.get("manufacturer_name"):
+            _web_found_fields.append("MANUFACTURER")
+        if web_entities.get("net_quantity"):
+            _web_found_fields.append("NET_QTY")
+        if web_entities.get("mrp"):
+            _web_found_fields.append("MRP")
+        if web_entities.get("fssai"):
+            _web_found_fields.append("FSSAI")
+        if web_entities.get("country_of_origin"):
+            _web_found_fields.append("COUNTRY")
+        if web_entities.get("expiry_date"):
+            _web_found_fields.append("EXPIRY")
+        if web_entities.get("mfg_date"):
+            _web_found_fields.append("MFG_DATE")
+        if web_entities.get("consumer_care_phone") or web_entities.get("consumer_care_email"):
+            _web_found_fields.append("CONSUMER_CARE")
+        if web_entities.get("ingredients"):
+            _web_found_fields.append("INGREDIENTS")
+        # Also count directly-extracted adapter keys
+        if not _web_found_fields:
+            if adapter_data.get("manufacturer_raw") or adapter_data.get("packer_raw"):
+                _web_found_fields.append("MANUFACTURER")
+            if adapter_data.get("net_quantity") or adapter_data.get("Item Weight"):
+                _web_found_fields.append("NET_QTY")
+            if adapter_data.get("mrp"):
+                _web_found_fields.append("MRP")
+            if adapter_data.get("fssai"):
+                _web_found_fields.append("FSSAI")
+            if adapter_data.get("country_of_origin"):
+                _web_found_fields.append("COUNTRY")
+
+        job["steps"][-1]["done"] = True
+        if _web_found_fields:
+            job["steps"][-1]["label"] = (
+                f"✓ Webpage fields detected: {' | '.join(_web_found_fields)}"
+            )
+        else:
+            job["steps"][-1]["label"] = (
+                "⚠ Limited data on webpage — will rely on packaging image OCR"
+            )
+
+        # Seed ocr_entities with web baseline (OCR will override these)
+        ocr_entities: dict = dict(web_entities)
+
         # ── Step 8: DOWNLOAD AND OCR PACKAGING IMAGES ─────────────────────────
         # EasyOCR is pre-warmed at startup. Multi-pass: full + contrast + crop.
         _add_step(scan_id, f"⟳ Downloading and analysing {len(packaging_candidates)} images...", done=False)
@@ -506,7 +597,7 @@ async def _run_scan(scan_id: str, url: str) -> None:
         else:
             job["steps"][-1]["label"] = (
                 f"⚠ OCR extracted limited text ({ocr_char_count} chars) from "
-                f"{imgs_downloaded}/{imgs_processed} images — packaging data may be incomplete"
+                f"{imgs_downloaded}/{imgs_processed} images — using webpage data"
             )
 
         # Log barcode results
@@ -514,10 +605,26 @@ async def _run_scan(scan_id: str, url: str) -> None:
             barcode_summary = ", ".join(f"{b['type']}:{b['value']}" for b in all_barcodes[:3])
             _add_step(scan_id, f"✓ Barcode decoded: {barcode_summary[:80]}")
 
-        # ── Step 9: Extract Legal Metrology entities from OCR text ─────────────
-        from url_scanner.intelligence.entity_extractor import extract_entities
-        ocr_entities = {}
+        # ── Step 9: Extract entities from OCR text → merge ON TOP of web baseline ─
+        # OCR entities take priority over web entities for same field.
+        # Fields only found on webpage (not in images) are preserved from web_entities.
+        _ocr_entities_from_images: dict = {}
         if combined_ocr_text:
+            _add_step(scan_id, "⟳ Extracting entities from packaging text...", done=False)
+            _ocr_entities_from_images = extract_entities(combined_ocr_text)
+            job["steps"][-1]["done"] = True
+
+            found_from_ocr = [k for k, v in _ocr_entities_from_images.items() if v]
+            if found_from_ocr:
+                _add_step(scan_id, f"✓ OCR entities detected: {', '.join(found_from_ocr[:8])}")
+            else:
+                _add_step(scan_id, "⚠ Entity extraction: limited fields found in OCR text — using webpage data")
+
+        # Merge: OCR image entities override web baseline for every field they find
+        for k, v in _ocr_entities_from_images.items():
+            if v:
+                ocr_entities[k] = v
+
             _add_step(scan_id, "⟳ Extracting entities from packaging text...", done=False)
             ocr_entities = extract_entities(combined_ocr_text)
             job["steps"][-1]["done"] = True
@@ -545,8 +652,7 @@ async def _run_scan(scan_id: str, url: str) -> None:
         _NETQTY_PATTERN      = _re.compile(r"net\s*(?:weight|wt|quantity|qty|content|vol)|nett?\s*wt|\d+\s*(?:kg|g\b|ml|litre|liter)\b", _re.I)
         _MRP_PATTERN         = _re.compile(r"m\.?r\.?p\.?|maximum\s*retail\s*price|rs\.?\s*\d|₹\s*\d", _re.I)
         _FSSAI_PATTERN       = _re.compile(r"fssai|f\.?s\.?s\.?a\.?i|lic(?:ence|ense)?\s*no|[1-9]\d{13}", _re.I)
-        _COUNTRY_PATTERN     = _re.compile(r"country\s*of\s*origin|made\s*in\s*india|product\s*of", _re.I)
-        # Ingredient detection — same fuzzy variants as thumbnail OCR signal
+        _COUNTRY_PATTERN     = _re.compile(r"country\s*of\s*origin|made\s*in\s*india|product\s*of|india|Made In", _re.I)
         _INGREDIENTS_PATTERN = _re.compile(
             r"INGREDI[EA]N[T]?S?\s*[:\-.]?"
             r"|INGREDI[1l]ENTS\s*[:\-.]?"
@@ -558,20 +664,80 @@ async def _run_scan(scan_id: str, url: str) -> None:
 
         _ALL_CRITICAL = ("manufacturer", "net_qty", "mrp", "fssai", "country", "ingredients")
 
-        def _check_missing_fields(text: str) -> list[str]:
-            """Return list of critical LM field names NOT yet found in combined OCR text."""
+        def _check_missing_fields(ocr_text: str, adp: dict) -> list[str]:
+            """
+            Return list of critical LM field names NOT yet found.
+            Checks BOTH raw OCR/page text AND the structured adapter_data fields,
+            so that fields extracted from the product details table are not falsely
+            reported as missing just because the OCR images were blank.
+            """
+            # Build a combined search text: OCR + all adapter_data string values
+            adp_text_parts = []
+            for k, v in adp.items():
+                if isinstance(v, str) and v:
+                    adp_text_parts.append(v)
+                elif isinstance(v, list):
+                    adp_text_parts.extend([str(x) for x in v if x])
+            combined = "\n".join(filter(None, [ocr_text] + adp_text_parts))
+
             missing = []
-            if not _MFR_PATTERN.search(text):         missing.append("manufacturer")
-            if not _NETQTY_PATTERN.search(text):      missing.append("net_qty")
-            if not _MRP_PATTERN.search(text):         missing.append("mrp")
-            if not _FSSAI_PATTERN.search(text):       missing.append("fssai")
-            if not _COUNTRY_PATTERN.search(text):     missing.append("country")
-            if not _INGREDIENTS_PATTERN.search(text): missing.append("ingredients")
+
+            # Manufacturer — also check structured adapter keys directly
+            mfr_present = (
+                _MFR_PATTERN.search(combined) or
+                adp.get("manufacturer_raw") or adp.get("packer_raw") or adp.get("importer_raw")
+            )
+            if not mfr_present:
+                missing.append("manufacturer")
+
+            # Net Quantity — also check adapter direct keys
+            qty_present = (
+                _NETQTY_PATTERN.search(combined) or
+                adp.get("net_quantity") or adp.get("Item Weight") or adp.get("Net Quantity") or
+                adp.get("Unit Count") or adp.get("Net Content") or adp.get("Net Weight")
+            )
+            if not qty_present:
+                missing.append("net_qty")
+
+            # MRP — also check adapter mrp key
+            mrp_present = (
+                _MRP_PATTERN.search(combined) or
+                adp.get("mrp") or adp.get("price_block")
+            )
+            if not mrp_present:
+                missing.append("mrp")
+
+            # FSSAI — also check adapter fssai key
+            fssai_present = (
+                _FSSAI_PATTERN.search(combined) or
+                adp.get("fssai")
+            )
+            if not fssai_present:
+                missing.append("fssai")
+
+            # Country of Origin — also check adapter key
+            country_present = (
+                _COUNTRY_PATTERN.search(combined) or
+                adp.get("country_of_origin")
+            )
+            if not country_present:
+                missing.append("country")
+
+            # Ingredients — OCR text and adapter ingredients field
+            ingr_present = (
+                _INGREDIENTS_PATTERN.search(combined) or
+                adp.get("ingredients")
+            )
+            if not ingr_present:
+                missing.append("ingredients")
+
             return missing
 
         # ── Field coverage summary (shown after OCR on the 4 selected images) ──
-        # No adaptive extension — we do exactly 4 images and stop.
-        missing_fields = _check_missing_fields(combined_ocr_text)
+        # Checks both OCR text AND webpage adapter data — so fields found on the
+        # product page (manufacturer table, net weight, MRP, country) are not
+        # falsely shown as missing just because OCR images were blank.
+        missing_fields = _check_missing_fields(combined_ocr_text, adapter_data)
         found_fields   = [f for f in _ALL_CRITICAL if f not in missing_fields]
 
         _cov_found   = " | ".join(f.upper() for f in found_fields)   or "none"
@@ -579,12 +745,9 @@ async def _run_scan(scan_id: str, url: str) -> None:
         _cov_pct     = int(100 * len(found_fields) / len(_ALL_CRITICAL))
         _add_step(
             scan_id,
-            f"✓ Coverage after initial OCR: {_cov_pct}% — "
+            f"✓ Coverage after OCR + webpage data: {_cov_pct}% — "
             f"FOUND: {_cov_found}  |  MISSING: {_cov_missing}"
         )
-
-
-
 
 
         # Also run entity extraction on combined adapter text (catches fields in JS-extracted data)
@@ -723,7 +886,7 @@ async def _run_scan(scan_id: str, url: str) -> None:
         # ── MRP ───────────────────────────────────────────────────────────────
         _com = model.get("commerce", {})
         _mrp_raw = _com.get("mrp_raw") or adapter_data.get("mrp") or adapter_data.get("price_block") or ""
-        _mrp_norm = _com.get("mrp_normalized", {})
+        _mrp_norm = _com.get("mrp_normalized") or {}
         if _mrp_norm.get("found") and _mrp_norm.get("amount"):
             _cp.append(f"MRP: Rs. {_mrp_norm['amount']}")
         elif _mrp_raw:
@@ -783,6 +946,62 @@ async def _run_scan(scan_id: str, url: str) -> None:
         platform_info_with_url = {**platform_info, "url": url}
         inferred_category = _infer_category(model, platform_info_with_url)
 
+        # ── Build lm_fields — 8 mandatory PCR 2011 §6 fields for UI display ──────
+        _mfr_d  = model.get("manufacturer", {})
+        _pkr_d  = model.get("packer", {})
+        _imp_d  = model.get("importer", {})
+        _qty_d  = model.get("quantity", {})
+        _com_d  = model.get("commerce", {})
+        _dt_d   = model.get("dates", {})
+        _cc_d   = model.get("consumer_care", {})
+        _ori_d  = model.get("origin", {})
+        _reg_d  = model.get("regulatory", {})
+
+        # Manufacturer / Importer — pick best non-empty value
+        _mfr_val = (
+            _mfr_d.get("name") or _mfr_d.get("address_raw") or
+            _pkr_d.get("name") or _pkr_d.get("address_raw") or
+            _imp_d.get("name") or _imp_d.get("address_raw") or
+            adapter_data.get("manufacturer_raw") or
+            adapter_data.get("packer_raw") or ""
+        )
+        # Importer separately (only if different from manufacturer)
+        _imp_val = (_imp_d.get("name") or _imp_d.get("address_raw") or "")
+        if _imp_val and _imp_val == _mfr_val:
+            _imp_val = ""
+
+        # Net Quantity
+        _qty_val = _qty_d.get("package_raw") or _qty_d.get("website_raw") or ""
+
+        # MRP
+        _mrp_norm_d = _com_d.get("mrp_normalized") or {}
+        _mrp_val = _mrp_norm_d.get("display") or _com_d.get("mrp_raw") or adapter_data.get("mrp") or ""
+
+        # Dates — Mfg date and expiry as separate fields
+        _mfg_val    = _dt_d.get("mfg_date") or ""
+        _expiry_val = _dt_d.get("expiry_date") or adapter_data.get("best_before") or ""
+
+        # Consumer Care
+        _cc_val = _cc_d.get("raw") or _cc_d.get("phone") or _cc_d.get("email") or adapter_data.get("consumer_care_phone") or ""
+
+        # Country of Origin
+        _coo_val = _ori_d.get("declared_country") or _ori_d.get("detected_country") or adapter_data.get("country_of_origin") or ""
+
+        # FSSAI
+        _fssai_val = _reg_d.get("fssai") or adapter_data.get("fssai") or ""
+
+        lm_fields = {
+            "manufacturer": _mfr_val,
+            "importer":     _imp_val,
+            "net_quantity":  _qty_val,
+            "mfg_date":     _mfg_val,
+            "expiry_date":  _expiry_val,
+            "mrp":          _mrp_val,
+            "consumer_care": _cc_val,
+            "country_of_origin": _coo_val,
+            "fssai":        _fssai_val,
+        }
+
         job["status"] = "done"
         job["result"] = {
             "scan_id": scan_id,
@@ -796,6 +1015,7 @@ async def _run_scan(scan_id: str, url: str) -> None:
             "packaging_images": packaging_count,
             "model": model,
             "comparisons": comparisons,
+            "lm_fields": lm_fields,              # 8 mandatory PCR 2011 §6 fields
         }
 
     except ValueError as exc:

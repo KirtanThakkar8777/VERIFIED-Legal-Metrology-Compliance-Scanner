@@ -11,21 +11,28 @@ import httpx
 MAX_RESPONSE_BYTES = 5 * 1024 * 1024  # 5 MB cap
 TIMEOUT = 25.0
 
-# Desktop Chrome UA — gets Amazon desktop page which embeds colorImages JS gallery data.
-# (Mobile UA causes Amazon to serve stripped mobile page without colorImages.)
+# Desktop Chrome 124 headers — full set that matches a real browser session.
+# Amazon's bot detection checks Sec-CH-UA, Priority, Cache-Control, and
+# the absence of automation-only headers. This set closely matches Chrome 124.
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     ),
-    "Accept-Language": "en-IN,en;q=0.9",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language": "en-IN,en;q=0.9,hi;q=0.8",
     "Accept-Encoding": "gzip, deflate, br",
+    "Cache-Control": "max-age=0",
     "Connection": "keep-alive",
     "Upgrade-Insecure-Requests": "1",
     "Sec-Fetch-Dest": "document",
     "Sec-Fetch-Mode": "navigate",
     "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Sec-CH-UA": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    "Sec-CH-UA-Mobile": "?0",
+    "Sec-CH-UA-Platform": '"Windows"',
+    "Priority": "u=0, i",
     "DNT": "1",
 }
 
@@ -58,11 +65,17 @@ async def fetch_page(url: str, platform_key: str = "generic") -> dict:
     if platform_key == "amazon":
         url = _clean_amazon_url(url)
 
+    # Add Referer for Amazon — mimics navigating from search results
+    req_headers = dict(HEADERS)
+    if "amazon." in url:
+        req_headers["Referer"] = "https://www.google.com/search?q=site:amazon.in"
+
     async with httpx.AsyncClient(
-        headers=HEADERS,
+        headers=req_headers,
         timeout=TIMEOUT,
         follow_redirects=True,
         max_redirects=5,
+        http2=True,           # HTTP/2 is characteristic of real browsers
     ) as client:
         resp = await client.get(url)
         resp.raise_for_status()
