@@ -155,30 +155,32 @@ _MRP_PATTERNS = [
 # NOTE: Use raw strings with SINGLE backslash escapes — double-backslash breaks them.
 
 _FSSAI_PATTERNS = [
-    # Pattern 1: "FSSAI Lic. No.: 12345678901234" or "FSSAI License No 12345678901234"
+    # Pattern 1: "FSSAI Lic. No.: 12345678901234" — matches solid or spaced digits
     re.compile(
         r"FSSAI\s*(?:Lic(?:ence|ense)?\.?\s*No\.?|License\s*No\.?|Lic\.?\s*No\.?|"
         r"#|Reg\.?\s*No\.?|Licence\s*Number|License\s*Number)?\s*[:\-]?\s*"
-        r"([1-9][\d\s]{12,17}\d)",
+        r"([1-9][\d\s\-]{12,17}\d)",
         re.IGNORECASE,
     ),
     # Pattern 2: "Lic. No. 12345678901234" (without explicit FSSAI keyword)
     re.compile(
-        r"Lic(?:ence|ense)?\.?\s*No\.?\s*[:\-]?\s*([1-9][\d\s]{12,17}\d)",
+        r"Lic(?:ence|ense)?\.?\s*No\.?\s*[:\-]?\s*([1-9][\d\s\-]{12,17}\d)",
         re.IGNORECASE,
     ),
     # Pattern 3: Licence Number label
     re.compile(
-        r"Licen[sc]e\s*(?:No\.?|Number)\s*[:\-]?\s*([1-9][\d\s]{12,17}\d)",
+        r"Licen[sc]e\s*(?:No\.?|Number)\s*[:\-]?\s*([1-9][\d\s\-]{12,17}\d)",
         re.IGNORECASE,
     ),
-    # Pattern 4: "FSSAI" anywhere near a 14-digit number (within next 60 chars)
-    re.compile(r"FSSAI[^\d]{0,50}([1-9]\d{13})", re.IGNORECASE | re.DOTALL),
+    # Pattern 4: "FSSAI" keyword near a 14-digit number (solid or spaced, within 80 chars)
+    re.compile(r"FSSAI[^\d]{0,60}([1-9][\d\s\-]{12,17}\d)", re.IGNORECASE | re.DOTALL),
     # Pattern 5: Raw 14-digit number on its own line (standalone licence number)
     re.compile(r"(?:^|\n)\s*([1-9]\d{13})\s*(?:\n|$)", re.MULTILINE),
+    # Pattern 5b: Spaced 14-digit number on its own line e.g. "1001 4022 0027 11"
+    re.compile(r"(?:^|\n)\s*([1-9]\d{3}[\s\-]\d{4}[\s\-]\d{4}[\s\-]\d{2})\s*(?:\n|$)", re.MULTILINE),
     # Pattern 6: OCR with spaces — "1 1521 9980 0076 9" → compact
     re.compile(r"\b([1-9][\d\s]{14,20}\d)\b"),
-    # Pattern 7: 14-digit block anywhere in text (less specific, last resort)
+    # Pattern 7: 14-digit block anywhere in text (last resort)
     re.compile(r"\b([1-9]\d{13})\b"),
 ]
 
@@ -192,18 +194,20 @@ _FSSAI_CONTEXT = re.compile(
 
 def _clean_fssai(raw: str) -> str:
     """Clean up an FSSAI number candidate — remove spaces/hyphens, validate length.
-    Also fixes common OCR misreads: O→0, I→1, l→1, S→5.
+    Also fixes common OCR misreads: O→0, I→1, l→1.
+    NOTE: Does NOT blindly replace S→5 — only in purely numeric context after stripping letters.
     """
-    # Fix common OCR character substitutions
     cleaned = raw.strip()
-    cleaned = re.sub(r"[^\dOIlSs\s\-]", "", cleaned)  # keep only digits + common misreads
+    # Only keep digits, O, I, l (common OCR misreads) and separators
+    cleaned = re.sub(r"[^\dOIlS\s\-]", "", cleaned)
     cleaned = cleaned.replace("O", "0").replace("o", "0")
     cleaned = cleaned.replace("I", "1").replace("l", "1")
-    cleaned = cleaned.replace("S", "5").replace("s", "5")  # only in numeric context
-    cleaned = re.sub(r"[\s\-]", "", cleaned)  # remove spaces and hyphens
+    # S→5 only if surrounded by digits (not at a letter/word boundary)
+    cleaned = re.sub(r"(?<=\d)S(?=\d)", "5", cleaned)
+    cleaned = re.sub(r"(?<=\d)s(?=\d)", "5", cleaned)
+    cleaned = re.sub(r"[\s\-]", "", cleaned)  # collapse spaces and hyphens
 
     if len(cleaned) == 14 and cleaned[0] != "0":
-        # Sanity check: must start with 1-9 (Indian FSSAI always starts with 1)
         if cleaned[0] in "123456789":
             return cleaned
     return ""

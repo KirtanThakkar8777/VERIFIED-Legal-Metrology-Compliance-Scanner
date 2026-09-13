@@ -710,18 +710,33 @@ def _marginal_gain(img: dict, covered: set[str]) -> int:
 
 
 def _is_near_duplicate(img_a: dict, img_b: dict) -> bool:
-    """Return True if two images appear to be near-duplicates."""
-    # Exact phash match
+    """Return True if two images appear to be near-duplicates.
+
+    An image is NOT a near-duplicate if it carries unique compliance signals
+    (FSSAI, dense text, manufacturer) that the other image doesn't have.
+    We only suppress truly redundant images.
+    """
+    # Exact phash match — identical images regardless of signals
     pa = img_a.get("phash", "")
     pb = img_b.get("phash", "")
     if pa and pb and pa == pb:
         return True
-    # Same category AND very close compliance score (likely same image, different resolution)
+
+    # Same category AND very close score — but only if NEITHER carries unique compliance signals
     cat_a = img_a.get("classification", {}).get("category", "")
     cat_b = img_b.get("classification", {}).get("category", "")
     if cat_a == cat_b and cat_a in ("front_package", "back_package") and cat_a != "unknown":
         score_diff = abs(img_a.get("compliance_score", 0) - img_b.get("compliance_score", 0))
         if score_diff <= 15:
+            # Don't suppress if either image has unique compliance signals
+            sigs_a = img_a.get("ocr_signals", {})
+            sigs_b = img_b.get("ocr_signals", {})
+            _UNIQUE = ("has_fssai_with_number", "has_fssai", "has_dense_text",
+                       "has_manufacturer", "has_mrp")
+            a_has = any(sigs_a.get(s) for s in _UNIQUE)
+            b_has = any(sigs_b.get(s) for s in _UNIQUE)
+            if a_has or b_has:
+                return False  # keep both — they may carry different compliance data
             return True
     return False
 

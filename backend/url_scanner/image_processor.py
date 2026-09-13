@@ -189,7 +189,14 @@ def _ocr_bytes(image_bytes: bytes) -> tuple[str, float]:
 # ── FSSAI-aware OCR result selection ──────────────────────────────────────────
 
 _FSSAI_SIGNAL = re.compile(
-    r"FSSAI|Lic\.?\s*No\.?|Licence\s*No|License\s*No|[1-9]\d{13}",
+    # Explicit FSSAI keyword or Lic.No. label
+    r"FSSAI|Lic\.?\s*No\.?|Licence\s*No|License\s*No|LIC\s*NO"
+    # 14-digit solid number starting with 1-9
+    r"|[1-9]\d{13}"
+    # 14-digit number with OCR spaces/hyphens (e.g. "1001 4022 0027 11" = 14 digits total)
+    r"|[1-9]\d{3}[\s\-]\d{4}[\s\-]\d{4}[\s\-]\d{2}"
+    r"|[1-9]\d{3}[\s\-]\d{4}[\s\-]\d{6}"
+    r"|[1-9]\d{1,3}(?:[\s\-]\d{2,4}){3,5}",
     re.IGNORECASE
 )
 _COMPLIANCE_SIGNAL = re.compile(
