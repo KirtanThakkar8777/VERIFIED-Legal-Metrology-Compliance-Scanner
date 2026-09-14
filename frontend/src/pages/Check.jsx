@@ -882,10 +882,10 @@ export default function Check() {
     }
   };
 
-  // ── Existing OCR handler (unchanged) ──────────────────────────────────────
+  // ── OCR handler — uploads image, formats as compliance text ───────────────
   const handleOcr = async () => {
     if (!imageFile) return;
-    setError(""); setLoading(true); setStatus("Running OCR…");
+    setError(""); setLoading(true); setStatus("Running OCR — extracting text from label image…");
     const formData = new FormData();
     formData.append("file", imageFile);
     try {
@@ -894,9 +894,20 @@ export default function Check() {
       });
       setText(data.extracted_text);
       setTab("text");
-      setStatus(`OCR complete — ${data.word_count} words extracted (${Math.round(data.confidence * 100)}% confidence). Review then Run Scan.`);
+      // Build helpful status with detected fields
+      const fieldsFound = (data.fields_detected || []).length;
+      const fieldNames = (data.fields_detected || [])
+        .slice(0, 4)
+        .map(f => f.replace(/_/g, " "))
+        .join(", ");
+      const fieldHint = fieldsFound > 0
+        ? ` — ${fieldsFound} field${fieldsFound !== 1 ? "s" : ""} detected (${fieldNames}${fieldsFound > 4 ? "…" : ""})`
+        : "";
+      setStatus(
+        `✓ OCR complete${fieldHint}. Text formatted for compliance check. Review then Run Scan.`
+      );
     } catch (e) {
-      setError(e.response?.data?.detail || "OCR failed.");
+      setError(e.response?.data?.detail || "OCR failed. Ensure the image is clear and well-lit.");
     } finally {
       setLoading(false);
     }
@@ -1113,24 +1124,47 @@ export default function Check() {
               </div>
             )}
 
-            {/* IMAGE TAB — unchanged */}
+            {/* IMAGE TAB — improved with preview + info */}
             {tab === "image" && (
               <div className="space-y-4">
                 <label className="mono-label text-muted-fg block">Upload Label / Packaging Image</label>
+
+                {/* Info note */}
+                <div className="border border-seal-gold/40 bg-seal-gold/5 px-3 py-2 text-xs text-ink-navy/80 flex gap-2">
+                  <span className="text-seal-gold shrink-0 mt-0.5">ℹ</span>
+                  <span>
+                    Upload a photo of the product label or packaging. OCR will extract text using
+                    multi-pass processing (full image + crop zones) and format it into structured
+                    compliance fields — <strong>Manufacturer, MRP, FSSAI, Country of Origin</strong>, etc.
+                  </span>
+                </div>
+
                 <div
                   onClick={() => fileRef.current?.click()}
-                  className="border-2 border-dashed border-border-main bg-ledger/50 p-12 text-center cursor-pointer hover:border-ink-navy transition-colors"
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    const f = e.dataTransfer.files?.[0];
+                    if (f && f.type.startsWith("image/")) setImageFile(f);
+                  }}
+                  className="border-2 border-dashed border-border-main bg-ledger/50 p-10 text-center cursor-pointer hover:border-ink-navy transition-colors"
                 >
                   {imageFile ? (
                     <div className="space-y-2">
+                      {/* Thumbnail preview */}
+                      <img
+                        src={URL.createObjectURL(imageFile)}
+                        alt="Label preview"
+                        className="max-h-40 mx-auto object-contain border border-border-main"
+                      />
                       <p className="text-sm font-medium text-ink-navy">{imageFile.name}</p>
-                      <p className="text-xs text-muted-fg">{(imageFile.size / 1024).toFixed(1)} KB</p>
+                      <p className="text-xs text-muted-fg">{(imageFile.size / 1024).toFixed(1)} KB · Click to change</p>
                     </div>
                   ) : (
                     <div className="space-y-2">
                       <p className="text-3xl">📸</p>
                       <p className="text-sm text-muted-fg">Click to upload or drag image here</p>
-                      <p className="text-xs text-muted-fg">PNG, JPG, WEBP accepted</p>
+                      <p className="text-xs text-muted-fg">PNG, JPG, WEBP accepted · Back-label photos give best results</p>
                     </div>
                   )}
                 </div>
@@ -1145,13 +1179,14 @@ export default function Check() {
                   <button
                     onClick={handleOcr}
                     disabled={loading}
-                    className="bg-ink-navy text-ink-light px-6 py-2.5 text-sm font-medium disabled:opacity-60 hover:bg-opacity-90 transition-colors"
+                    className="w-full bg-ink-navy text-ink-light px-6 py-3 text-sm font-medium disabled:opacity-60 hover:bg-opacity-90 transition-colors"
                   >
-                    {loading ? "Processing OCR…" : "Extract Text via OCR"}
+                    {loading ? "⟳ Extracting & Formatting Text…" : "▶ Extract & Format Label Text"}
                   </button>
                 )}
               </div>
             )}
+
           </div>
 
           {/* Status / error — unchanged */}

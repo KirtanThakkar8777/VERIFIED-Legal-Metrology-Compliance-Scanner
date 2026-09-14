@@ -30,13 +30,53 @@ _MFR_ROLE_PATTERNS: list[tuple[re.Pattern, list[str]]] = [
         r"Processed[\s,]+[Pp]acked\s*(?:and\s+)?(?:[Mm]arketed\s*)?[Bb]y\s*[:\-]?\s*(.+?)(?=\n\n|\n(?:[A-Z]{{2,}}:)|$)",
         re.IGNORECASE | re.DOTALL,
     ), ["manufacturer", "packer", "marketer"]),
-    # Single roles
+
+    # ── Importer variants (most common on imported packaged foods) ────────────
+    # "IMPORTED IN INDIA BY: Ferrero India Pvt. Ltd..."
+    (re.compile(
+        r"Imported\s+in\s+India\s+[Bb]y\s*[:\-]?\s*(.+?)(?=\n\n|\n(?:[A-Z]{{2,}}:)|PACKED\s+BY|MFD\s+BY|MANUFACTURED|$)",
+        re.IGNORECASE | re.DOTALL,
+    ), ["importer"]),
+    # "IMPORTED AND MARKETED BY:" or "IMPORTED & MARKETED BY:"
+    (re.compile(
+        r"Imported\s+(?:and|&)\s+(?:Marketed|Distributed|Sold)\s+[Bb]y\s*[:\-]?\s*(.+?)(?=\n\n|\n(?:[A-Z]{{2,}}:)|$)",
+        re.IGNORECASE | re.DOTALL,
+    ), ["importer", "marketer"]),
+    # "SOLE IMPORTER:" or "AUTHORISED IMPORTER:"
+    (re.compile(
+        r"(?:Sole|Authoris[e]?d|Exclusive)\s+Importer\s*[:\-]?\s*(.+?)(?=\n\n|\n(?:[A-Z]{{2,}}:)|$)",
+        re.IGNORECASE | re.DOTALL,
+    ), ["importer"]),
+    # "IMPORTER:" standalone label
+    (re.compile(
+        r"^IMPORTER\s*[:\-]\s*(.+?)(?=\n(?:[A-Z]{{2,}}:)|$)",
+        re.IGNORECASE | re.MULTILINE | re.DOTALL,
+    ), ["importer"]),
+
+    # ── Marketer / Distributor variants ───────────────────────────────────────
+    # "MKT. BY:" or "MARKETED BY:" or "MARKETED AND DISTRIBUTED BY:"
+    (re.compile(
+        r"(?:Mkt\.?\s*[Bb]y|Marketed\s+[Bb]y|Marketed\s+(?:and|&)\s+Distributed\s+[Bb]y)\s*[:\-]?\s*(.+?)(?=\n\n|\n(?:[A-Z]{{2,}}:)|$)",
+        re.IGNORECASE | re.DOTALL,
+    ), ["marketer"]),
+    # "FOR SALE IN INDIA CONTACT:" / "INDIA CONTACT:"
+    (re.compile(
+        r"(?:For\s+Sale\s+in\s+India|India\s+Contact|India\s+Office)\s*[:\-]?\s*(.+?)(?=\n\n|\n(?:[A-Z]{{2,}}:)|$)",
+        re.IGNORECASE | re.DOTALL,
+    ), ["importer"]),
+
+    # ── Standard single-role patterns ─────────────────────────────────────────
     (re.compile(
         r"Manufactured\s+[Bb]y\s*[:\-]?\s*(.+?)(?=\n\n|\n(?:[A-Z]{{2,}}:)|$)",
         re.IGNORECASE | re.DOTALL,
     ), ["manufacturer"]),
     (re.compile(
         r"(?:Mfd\.?|Mfg\.?)\s*[Bb]y\s*[:\-]?\s*(.+?)(?=\n\n|\n(?:[A-Z]{{2,}}:)|$)",
+        re.IGNORECASE | re.DOTALL,
+    ), ["manufacturer"]),
+    # "MFD. IN ITALY BY:" (manufacturing in another country)
+    (re.compile(
+        r"Mf[gd]\.?\s+in\s+[A-Za-z\s]+\s+[Bb]y\s*[:\-]?\s*(.+?)(?=\n\n|\n(?:[A-Z]{{2,}}:)|$)",
         re.IGNORECASE | re.DOTALL,
     ), ["manufacturer"]),
     (re.compile(
@@ -303,12 +343,24 @@ _STORAGE_PATTERNS = [
 ]
 
 # ── Country of Origin ─────────────────────────────────────────────────────────
+# IMPORTANT: OCR from product labels often puts label and value on separate lines.
+# Patterns must handle both same-line AND next-line value layouts.
 
 _COO_PATTERNS = [
-    re.compile(r"Country\s*of\s*Origin\s*[:\-]?\s*([A-Za-z\s]{3,30}?)(?:\n|$|\||,)", re.IGNORECASE),
-    re.compile(r"Made\s+in\s+([A-Za-z\s]{3,25}?)(?:\n|$|\||\.|,)", re.IGNORECASE),
-    re.compile(r"Product\s+of\s+([A-Za-z\s]{3,25}?)(?:\n|$|\||\.|,)", re.IGNORECASE),
+    # Same line: "Country of Origin: India" or "Country of Origin India"
+    re.compile(r"Country\s*of\s*Origin\s*[:\-]?\s*([A-Za-z][A-Za-z\s]{2,29}?)(?:\n|$|\||,|\s{2,})", re.IGNORECASE),
+    # Next line: "Country of Origin\nIndia" (very common in OCR of packaged labels)
+    re.compile(r"Country\s*of\s*Origin\s*[:\-]?\s*\n\s*([A-Za-z][A-Za-z\s]{2,25}?)(?:\n|$|\||,)", re.IGNORECASE),
+    # Short label "Origin: India"
+    re.compile(r"\bOrigin\s*[:\-]\s*([A-Za-z][A-Za-z\s]{2,25}?)(?:\n|$|\||,|\s{2,})", re.IGNORECASE),
+    # "Made in India" on same line or at line end
+    re.compile(r"Made\s+in\s+([A-Za-z][A-Za-z\s]{2,25}?)(?:\n|$|\||\.|\,|\s{2,})", re.IGNORECASE),
+    # "Product of India"
+    re.compile(r"Product\s+of\s+([A-Za-z][A-Za-z\s]{2,25}?)(?:\n|$|\||\.|\,)", re.IGNORECASE),
+    # "Produce of India"
+    re.compile(r"Produce\s+of\s+([A-Za-z][A-Za-z\s]{2,25}?)(?:\n|$|\||\.|\,)", re.IGNORECASE),
 ]
+
 
 # ── Barcode / GTIN ────────────────────────────────────────────────────────────
 
@@ -355,6 +407,105 @@ def _check_ingredient_completeness(ingredient_text: str) -> bool:
         return False
     tail = ingredient_text.strip()[-80:]   # inspect last 80 chars
     return not bool(_TRUNCATION_SIGNALS.search(tail))
+
+
+# ── Country inference from address ────────────────────────────────────────────
+
+# Indian states, UTs, and major cities — if present in an address, country = India
+_INDIA_GEO = re.compile(
+    r"\b("
+    # All 28 states
+    r"Andhra\s*Pradesh|Arunachal\s*Pradesh|Assam|Bihar|Chhattisgarh|Goa|Gujarat|"
+    r"Haryana|Himachal\s*Pradesh|Jharkhand|Karnataka|Kerala|Madhya\s*Pradesh|"
+    r"Maharashtra|Manipur|Meghalaya|Mizoram|Nagaland|Odisha|Orissa|Punjab|"
+    r"Rajasthan|Sikkim|Tamil\s*Nadu|Telangana|Tripura|Uttar\s*Pradesh|Uttarakhand|"
+    r"West\s*Bengal|"
+    # Union territories
+    r"Andaman|Nicobar|Chandigarh|Dadra|Nagar\s*Haveli|Daman|Diu|Delhi|"
+    r"Jammu|Kashmir|Ladakh|Lakshadweep|Puducherry|Pondicherry|"
+    # Major cities
+    r"Mumbai|Bombay|Delhi|Kolkata|Calcutta|Chennai|Madras|Bangalore|Bengaluru|"
+    r"Hyderabad|Ahmedabad|Pune|Surat|Jaipur|Lucknow|Kanpur|Nagpur|Indore|"
+    r"Thane|Bhopal|Visakhapatnam|Pimpri|Patna|Vadodara|Ghaziabad|Ludhiana|"
+    r"Agra|Nashik|Faridabad|Meerut|Rajkot|Varanasi|Srinagar|Aurangabad|"
+    r"Dhanbad|Amritsar|Navi\s*Mumbai|Allahabad|Howrah|Coimbatore|Jabalpur|"
+    r"Gwalior|Vijayawada|Jodhpur|Madurai|Raipur|Kota|Guwahati|Chandigarh|"
+    r"Solapur|Hubli|Baddi|Silvassa|Haridwar|Rishikesh|Noida|Gurugram|Gurgaon"
+    r")\b",
+    re.IGNORECASE
+)
+
+# 6-digit Indian PIN code pattern
+_INDIA_PIN = re.compile(r"\b[1-9]\d{5}\b")
+
+# Other countries — matched against full address text
+_OTHER_COUNTRIES = [
+    (re.compile(r"\bChina\b|\bPRC\b|\bPeople'?s\s*Republic\b", re.I), "China"),
+    (re.compile(r"\bUSA\b|\bUnited\s*States\b|\bU\.S\.A\.?\b", re.I), "USA"),
+    (re.compile(r"\bUnited\s*Kingdom\b|\bU\.K\.?\b|\bEngland\b|\bBritain\b", re.I), "United Kingdom"),
+    (re.compile(r"\bGermany\b|\bDeutschland\b", re.I), "Germany"),
+    (re.compile(r"\bFrance\b|\bFrench\b", re.I), "France"),
+    (re.compile(r"\bItaly\b|\bItalia\b", re.I), "Italy"),
+    (re.compile(r"\bJapan\b|\bJapanese\b", re.I), "Japan"),
+    (re.compile(r"\bSri\s*Lanka\b", re.I), "Sri Lanka"),
+    (re.compile(r"\bBangladesh\b", re.I), "Bangladesh"),
+    (re.compile(r"\bPakistan\b", re.I), "Pakistan"),
+    (re.compile(r"\bNepal\b", re.I), "Nepal"),
+    (re.compile(r"\bAustralia\b", re.I), "Australia"),
+    (re.compile(r"\bCanada\b", re.I), "Canada"),
+    (re.compile(r"\bThailand\b", re.I), "Thailand"),
+    (re.compile(r"\bVietnam\b", re.I), "Vietnam"),
+    (re.compile(r"\bIndonesia\b", re.I), "Indonesia"),
+    (re.compile(r"\bMalaysia\b", re.I), "Malaysia"),
+    (re.compile(r"\bSingapore\b", re.I), "Singapore"),
+    (re.compile(r"\bIsrael\b", re.I), "Israel"),
+    (re.compile(r"\bNetherlands\b|\bHolland\b", re.I), "Netherlands"),
+    (re.compile(r"\bSpain\b|\bEspana\b", re.I), "Spain"),
+    (re.compile(r"\bSwitzerland\b", re.I), "Switzerland"),
+    (re.compile(r"\bDenmark\b", re.I), "Denmark"),
+    (re.compile(r"\bSweden\b", re.I), "Sweden"),
+    (re.compile(r"\bNorway\b", re.I), "Norway"),
+    (re.compile(r"\bBelgium\b", re.I), "Belgium"),
+    (re.compile(r"\bPoland\b", re.I), "Poland"),
+    (re.compile(r"\bTurkey\b|\bTürkiye\b", re.I), "Turkey"),
+    (re.compile(r"\bMexico\b", re.I), "Mexico"),
+    (re.compile(r"\bBrazil\b|\bBrasil\b", re.I), "Brazil"),
+    (re.compile(r"\bSouth\s*Korea\b|\bRepublic\s*of\s*Korea\b", re.I), "South Korea"),
+    (re.compile(r"\bTaiwan\b", re.I), "Taiwan"),
+    (re.compile(r"\bIndia\b", re.I), "India"),  # explicit "India" in address
+]
+
+
+def _infer_country_from_address(address_text: str) -> str:
+    """
+    Infer the country of origin from a manufacturer/packer/importer address string.
+
+    Returns country name (e.g. 'India') or empty string if cannot be determined.
+
+    Priority:
+      1. Explicit Indian state/city/UT name → India  (most reliable for India)
+      2. Explicit other country name match
+      3. 6-digit Indian PIN code → India  (fallback, only if no country name matched)
+    """
+    if not address_text or len(address_text.strip()) < 5:
+        return ""
+
+    # India check — state/city/UT names are highly reliable
+    if _INDIA_GEO.search(address_text):
+        return "India"
+
+    # Check for explicit country names (including "India" word itself)
+    for pat, country in _OTHER_COUNTRIES:
+        if pat.search(address_text):
+            return country
+
+    # Indian PIN code as last resort (only if no other country identified above)
+    # FSSAI is 14 digits — exclude any 14-digit runs first
+    clean = re.sub(r"\d{14}", "", address_text)
+    if _INDIA_PIN.search(clean):
+        return "India"
+
+    return ""
 
 
 # ── Main extraction function ──────────────────────────────────────────────────
@@ -462,6 +613,27 @@ def extract_entities(ocr_text: str) -> dict:
     coo = _first_match(text, _COO_PATTERNS)
     if coo:
         entities["country_of_origin"] = coo.strip()
+
+    # ── Infer Country of Origin from manufacturer/packer address ─────────────
+    # When the label doesn't explicitly say "Country of Origin: India" but the
+    # manufacturer address contains Indian states/cities/PIN codes, we infer India.
+    # This is valid: PCR 2011 §6(1)(g) allows COO to be implied by Indian address.
+    if not entities.get("country_of_origin"):
+        # Collect all address text we have
+        _addr_parts = [
+            entities.get("manufacturer_raw", ""),
+            entities.get("manufacturer_address", ""),
+            entities.get("packer_raw", ""),
+            entities.get("packer_address", ""),
+            entities.get("importer_raw", ""),
+            entities.get("importer_address", ""),
+        ]
+        _addr_text = " ".join(p for p in _addr_parts if p)
+        if _addr_text:
+            inferred = _infer_country_from_address(_addr_text)
+            if inferred:
+                entities["country_of_origin"] = inferred
+                entities["country_inferred_from_address"] = True
 
 
     # ── Ingredients ───────────────────────────────────────────────────────────

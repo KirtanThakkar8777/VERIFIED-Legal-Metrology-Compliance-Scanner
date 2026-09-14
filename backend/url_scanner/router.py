@@ -715,13 +715,32 @@ async def _run_scan(scan_id: str, url: str) -> None:
             if not fssai_present:
                 missing.append("fssai")
 
-            # Country of Origin — also check adapter key
+            # Country of Origin — check text, adapter key, OR infer from address
             country_present = (
                 _COUNTRY_PATTERN.search(combined) or
                 adp.get("country_of_origin")
             )
             if not country_present:
+                # Infer from manufacturer/packer address — if address contains Indian
+                # state/city/PIN code, country is India (very common case)
+                from url_scanner.intelligence.entity_extractor import _infer_country_from_address
+                _mfr_addr = " ".join(filter(None, [
+                    adp.get("manufacturer_raw", ""),
+                    adp.get("packer_raw", ""),
+                    adp.get("importer_raw", ""),
+                    adp.get("Manufacturer Address", ""),
+                    adp.get("Manufacturer Name", ""),
+                ]))
+                if _mfr_addr and _infer_country_from_address(_mfr_addr):
+                    country_present = True
+                # Also check if OCR text itself implies India via address content
+                if not country_present and combined:
+                    _ocr_inferred = _infer_country_from_address(combined)
+                    if _ocr_inferred:
+                        country_present = True
+            if not country_present:
                 missing.append("country")
+
 
             # Ingredients — OCR text and adapter ingredients field
             ingr_present = (
@@ -910,8 +929,27 @@ async def _run_scan(scan_id: str, url: str) -> None:
 
         # ── Country of Origin ─────────────────────────────────────────────────
         _orig = model.get("origin", {})
-        _country = _orig.get("declared_country") or _orig.get("detected_country") or adapter_data.get("country_of_origin") or ""
-        if _country: _cp.append(f"Country of Origin: {_country}")
+        _country = (
+            _orig.get("declared_country") or
+            _orig.get("detected_country") or
+            adapter_data.get("country_of_origin") or
+            ocr_entities.get("country_of_origin") or ""
+        )
+        if not _country:
+            # Infer from address — "HIMACHAL PRADESH" in manufacturer addr → India
+            from url_scanner.intelligence.entity_extractor import _infer_country_from_address
+            _addr_for_infer = " ".join(filter(None, [
+                adapter_data.get("manufacturer_raw", ""),
+                adapter_data.get("packer_raw", ""),
+                adapter_data.get("Manufacturer Address", ""),
+                adapter_data.get("Manufacturer Name", ""),
+                model.get("manufacturer", {}).get("address_raw", ""),
+            ]))
+            if _addr_for_infer:
+                _country = _infer_country_from_address(_addr_for_infer)
+        if _country:
+            _cp.append(f"Country of Origin: {_country}")
+
 
         # ── FSSAI ─────────────────────────────────────────────────────────────
         _reg = model.get("regulatory", {})
@@ -984,8 +1022,31 @@ async def _run_scan(scan_id: str, url: str) -> None:
         # Consumer Care
         _cc_val = _cc_d.get("raw") or _cc_d.get("phone") or _cc_d.get("email") or adapter_data.get("consumer_care_phone") or ""
 
-        # Country of Origin
-        _coo_val = _ori_d.get("declared_country") or _ori_d.get("detected_country") or adapter_data.get("country_of_origin") or ""
+        # Country of Origin — explicit value or inferred from manufacturer address
+        _coo_val = (
+            _ori_d.get("declared_country") or
+            _ori_d.get("detected_country") or
+            adapter_data.get("country_of_origin") or
+            ocr_entities.get("country_of_origin") or ""
+        )
+        if not _coo_val:
+            # Infer from manufacturer/packer/importer address
+            from url_scanner.intelligence.entity_extractor import _infer_country_from_address
+            _all_addr = " ".join(filter(None, [
+                _mfr_d.get("address_raw", ""),
+                _pkr_d.get("address_raw", ""),
+                _imp_d.get("address_raw", ""),
+                adapter_data.get("manufacturer_raw", ""),
+                adapter_data.get("packer_raw", ""),
+                adapter_data.get("Manufacturer Address", ""),
+                adapter_data.get("Manufacturer Name", ""),
+            ]))
+            if _all_addr:
+                _inferred = _infer_country_from_address(_all_addr)
+                if _inferred:
+                    _coo_val = _inferred
+                    # Also add to compliance text so rules engine sees it
+                    compliance_text = compliance_text + f"\nCountry of Origin: {_inferred}"
 
         # FSSAI
         _fssai_val = _reg_d.get("fssai") or adapter_data.get("fssai") or ""

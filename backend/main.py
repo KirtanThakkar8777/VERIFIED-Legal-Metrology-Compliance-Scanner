@@ -17,19 +17,35 @@ Base.metadata.create_all(bind=engine)
 
 # ── Seed default admin user (runs once on startup if no users exist) ──────────
 def _seed_admin():
-    from auth.utils import hash_password
+    from auth.utils import hash_password, verify_password
     db = SessionLocal()
     try:
-        if db.query(models.User).count() == 0:
-            admin = models.User(
-                name="Admin",
-                email="admin@verified.dev",
-                password_hash=hash_password("admin123"),
-                role="REGULATOR",
-            )
-            db.add(admin)
-            db.commit()
-            print("✅ Default admin created → email: admin@verified.dev  password: admin123")
+        admin = db.query(models.User).filter(models.User.email == "admin@verified.in").first()
+        if not admin:
+            # Also check old email from previous seed
+            old = db.query(models.User).filter(models.User.email == "admin@verified.dev").first()
+            if old:
+                # Migrate email to correct one
+                old.email = "admin@verified.in"
+                old.password_hash = hash_password("Admin@123")
+                db.commit()
+                print("✅ Admin email migrated → admin@verified.in  password: Admin@123")
+            else:
+                admin = models.User(
+                    name="Admin",
+                    email="admin@verified.in",
+                    password_hash=hash_password("Admin@123"),
+                    role="REGULATOR",
+                )
+                db.add(admin)
+                db.commit()
+                print("✅ Default admin created → email: admin@verified.in  password: Admin@123")
+        else:
+            # Ensure password is correct (fix if old seed used wrong password)
+            if not verify_password("Admin@123", admin.password_hash):
+                admin.password_hash = hash_password("Admin@123")
+                db.commit()
+                print("✅ Admin password updated → Admin@123")
     finally:
         db.close()
 
@@ -104,17 +120,26 @@ async def fetch_url(payload: schemas.FetchUrlRequest):
 
 # ── OCR endpoint ──────────────────────────────────────────────────────────────
 from ocr.service import extract_text_from_image
+import asyncio
 
 @app.post("/api/ocr", response_model=schemas.OcrOut, tags=["OCR"])
 async def ocr_image(file: UploadFile = File(...)):
-    """Upload an image file; returns OCR-extracted text."""
-    if not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=422, detail="Only image files accepted.")
+    """Upload a label/packaging image; returns structured compliance-ready text."""
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=422, detail="Only image files accepted (PNG, JPG, WEBP).")
     image_bytes = await file.read()
+    if len(image_bytes) < 1000:
+        raise HTTPException(status_code=422, detail="Image too small — please upload a clear label photo.")
     try:
-        result = extract_text_from_image(image_bytes)
+        # Run synchronous OCR in a thread (heavy CPU — would block event loop otherwise)
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, extract_text_from_image, image_bytes)
     except ValueError as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
+        raise HTTPException(status_code=422, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=f"OCR engine error: {exc}")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"OCR processing failed: {exc}")
     return result
 
 

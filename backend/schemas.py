@@ -109,9 +109,11 @@ class FetchUrlOut(BaseModel):
 # ── OCR schema ────────────────────────────────────────────────────────────────
 
 class OcrOut(BaseModel):
-    extracted_text: str
+    extracted_text: str                         # compliance-ready structured text
+    raw_ocr_text: str = ""                      # raw OCR output (for display/debug)
     confidence: float
     word_count: int
+    fields_detected: List[str] = []             # list of compliance fields found
 
 
 # ── Dashboard schemas ─────────────────────────────────────────────────────────
